@@ -54,6 +54,6 @@ def train_loop(model, variant_name, dataloader, epochs=5, device="cuda", lambda_
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             
-    # Save checkpoint specifically for this lambda rate target
-    torch.save(model.state_dict(), f"ablation_results/{variant_name}_rate_{lambda_rate}.pth")
-    print(f"[{variant_name}] Saved checkpoint.")
+    # Save checkpoint after all epochs for this specific variant and lambda
+    torch.save(model.state_dict(), f"ablation_results/{variant_name}.pth")
+    print(f"[{variant_name}] Saved checkpoint to {variant_name}.pth.")

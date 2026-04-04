@@ -158,9 +158,8 @@ def run_ablation_study(
                   f"SSIM={point.get('SSIM',0):.4f} | "
                   f"LPIPS={point.get('LPIPS',0):.4f}")
 
-            # Show reconstruction for the middle lambda only (saves time)
-            if lam == LAMBDA_RATES[len(LAMBDA_RATES) // 2]:
-                visualise_reconstruction(model, val_loader, variant_name, lam, device)
+            # Show reconstruction for every lambda and variant (at the end of epochs)
+            visualise_reconstruction(model, val_loader, variant_name, lam, device)
 
             # Incremental RD plot after each lambda
             try:
