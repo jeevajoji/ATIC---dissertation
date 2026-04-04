@@ -136,6 +136,11 @@ def run_ablation_study(
                 print(f"Plotting skipped/failed: {e}")
             # --------------------------------------------------------
 
+        # Free up GPU memory before moving to the next ablation variant
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     print("\nAblation study completed. All RD curves saved to ablation_results/plots/")
     return all_results
 
