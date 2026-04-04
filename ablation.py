@@ -97,7 +97,7 @@ def visualise_reconstruction(model, val_loader, variant_name, lam, device):
 # ---------------------------------------------------------------------------
 def run_ablation_study(
     video_path: str  = "/kaggle/input/datasets/jeevajoji/uvg-honeybee",
-    epochs: int      = 10,
+    epochs: int      = 2,
     device: str      = "cuda",
     # Set to a list of variant names to run only those, e.g. ["A1_Baseline", "A6_FullATIC"]
     run_variants     = None,
