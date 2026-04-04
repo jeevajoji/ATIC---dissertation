@@ -1,0 +1,13 @@
+# Ignore to-do list
+todo.txt
+
+# Ignore virtual environments
+.venv/
+__pycache__/
+
+# Ignore heavy dataset and result directories
+UVG dataset/
+UVG frames/
+ablation_results/plots/
+Papers/
+Res prop/

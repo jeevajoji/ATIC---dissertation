@@ -1,0 +1,115 @@
+INPUT FRAME (PNG, 1920×1080, extracted from YUV)
+         │
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ BLOCK 1 — OVERLAPPING PATCH TOKENIZER            # non vanilla ViT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  16×16 patches, stride 8 (50% overlap)
+  Each patch → linear projection → 128-dim token vector
+  Overlap ensures patch boundaries (bee wings)
+
+  1920×1080 → 57,600 overlapping tokens (factor of 36)
+         │
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ BLOCK 2 — SWIN TRANSFORMER ENCODER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  4 stages, each stage = 2 Swin Transformer blocks
+  Each stage halves spatial resolution, doubles channels
+
+  Layer 1: 57,600 tokens → fine texture (bee wings, water ripples) /2
+  Layer 2: 14,400 tokens → mid-level structure (shapes, edges)     x2
+
+  Layer 3: 3,600 tokens → objects (boat, horizon, flower)          x2
+  Layer 4: 900 tokens → scene semantics (sky, water, macro)        x2
+
+  Inside EACH Swin block — 3-layer attention stack:
+  
+  ┌─────────────────────────────────────────┐
+  │ LAYER A — Shifted Window Attention      │        # kernel or linear patch
+  │   Attention within 7×7 local windows    │
+  │   Windows shift between layers →        │
+  │   local + global context over depth     │
+  │                  ↓                      │
+  │ LAYER B — Spatial Attention Gate        │        # gating and context
+  │   Produces H×W map of values 0→1        │          aware quant map
+  │   High value = complex region           │
+  │   Low value  = simple region            │
+  │   HoneyBee wings → 0.9                  │
+  │   Smooth sky     → 0.1                  │
+  │                  ↓                      │
+  │ LAYER C — Channel Attention (CBAM)      │        # learning whats needed  
+  │   Across feature channels               │         
+  └─────────────────────────────────────────┘
+         │
+-
+
+  Output: compact latent tensor 
+  (900 tokens × 512 channels)
+         │
+         ▼
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ BLOCK 3 — ATTENTION-GUIDED ADAPTIVE QUANTIZER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Takes: latent z + spatial attention map from Block 2
+
+  Spatial attention map → quantization step size per region:
+    High attention (0.9) → small step size → fine quantization
+                                           → more bits, high fidelity
+    Low attention  (0.1) → large step size → coarse quantization
+                                           → fewer bits, acceptable loss
+
+  Output: quantized latent (integers, ready for entropy coding)
+         │
+         ▼
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ BLOCK 4 — HYPERPRIOR ENTROPY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Two sub-networks:
+    Hyper Encoder and Hyper Decoder
+
+  Arithmetic coder uses μ, σ to assign bit lengths:
+    Likely value (near μ, small σ)  → few bits
+    Surprising value (far from μ)   → more bits
+
+  Output: BITSTREAM (the actual compressed file)
+         │
+    ═════════════
+    BITSTREAM
+    ═════════════
+         │
+         ▼
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ BLOCK 5 — ARITHMETIC DECODER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Reads bitstream + μ, σ from hyperprior
+  Reconstructs quantized latent ẑ exactly
+         │
+         ▼
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ BLOCK 6 — MIRROR SWIN TRANSFORMER DECODER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Exact mirror of Block 2 — 4 stages in reverse
+
+  Stage 4: 900 tokens  → scene to objects
+  Stage 3: 3,600 tokens → objects to structure  
+  Stage 2: 14,400 tokens → structure to texture
+  Stage 1: 57,600 tokens → texture to pixels
+
+  Same 3-layer attention stack inside each block
+  (Window → Spatial → Channel)
+
+  Patch overlap is reversed — overlapping patches
+  averaged back into full resolution frame
+
+  Output: reconstructed frame (floating point)
+         │
+         ▼
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ BLOCK 7 — PATCH RECONSTRUCTOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Merges overlapping decoded patches back
+  into full 1920×1080 frame
+  Overlap regions averaged → no seam artifacts
+         │
+         ▼
+OUTPUT FRAME (reconstructed PNG, 1920×1080)
