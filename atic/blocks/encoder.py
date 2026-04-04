@@ -61,7 +61,10 @@ class SwinStage(nn.Module):
     ):
         super().__init__()
 
-        from timm.models.swin_transformer import BasicLayer
+        try:
+            from timm.models.swin_transformer import BasicLayer
+        except ImportError:
+            from timm.models.swin_transformer import SwinTransformerStage as BasicLayer
 
         assert depth % 2 == 0, f"depth must be even (W-MSA + SW-MSA pairs), got {depth}"
 
@@ -85,9 +88,18 @@ class SwinStage(nn.Module):
         Returns:    (B, C, H, W)  — same spatial size, same channels
         """
         B, C, H, W = x.shape
-        x = x.permute(0, 2, 3, 1).reshape(B, H * W, C)   # (B, L, C)
-        x = self.layer(x)
-        x = x.reshape(B, H, W, C).permute(0, 3, 1, 2)    # (B, C, H, W)
+        x_permuted = x.permute(0, 2, 3, 1) # (B, H, W, C)
+        
+        # New timm SwinTransformerStage uses (B, H, W, C) 
+        # Old timm BasicLayer uses (B, L, C)
+        if type(self.layer).__name__ == "SwinTransformerStage":
+            x_out = self.layer(x_permuted)
+        else:
+            x_reshaped = x_permuted.reshape(B, H * W, C)   # (B, L, C)
+            x_out = self.layer(x_reshaped)
+            x_out = x_out.reshape(B, H, W, C)
+            
+        x = x_out.permute(0, 3, 1, 2)    # (B, C, H, W)
         return x
 
 

@@ -179,6 +179,6 @@ if __name__ == "__main__":
     # Quick test: run only A1 and A6 with 3 lambdas to validate pipeline
     # then swap run_variants=None for the full study
     run_ablation_study(
-        epochs=10,
+        epochs=2,
         run_variants=["A1_Baseline", "A6_FullATIC"],
     )
