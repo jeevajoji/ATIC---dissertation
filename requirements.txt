@@ -1,0 +1,4 @@
+compressai
+timm==0.6.13
+lpips
+piq

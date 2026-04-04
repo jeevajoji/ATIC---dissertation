@@ -65,13 +65,13 @@ ABLATION_VARIANTS = {
 
 
 def run_ablation_study(
-    video_path: str = "UVG frames/honeybee",
-    epochs: int = 10,
+    video_path: str = "/kaggle/input/datasets/jeevajoji/uvg-honeybee",
+    epochs: int = 2,
     lambda_rate: float = 0.01,
     device: str = "cuda",
 ):
     os.makedirs("ablation_results", exist_ok=True)
-    device = device if torch.cuda.is_available() else "cpu"
+    device = device if torch.cuda.is_available() else "cuda"
     print(f"Device: {device}")
 
     train_loader, val_loader = get_video_dataloaders(
