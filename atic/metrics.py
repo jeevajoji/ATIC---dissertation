@@ -133,6 +133,7 @@ def plot_rate_distortion_curves(results_dict, metrics_to_plot=['PSNR', 'SSIM', '
         # Save output png
         save_path = os.path.join(save_dir, f'RD_Curve_{metric}.png')
         plt.savefig(save_path, bbox_inches='tight', dpi=300)
-        plt.close()
         
         print(f"Generated RD Graph: {save_path}")
+        plt.show() # Display inline in Kaggle notebook
+        plt.close()

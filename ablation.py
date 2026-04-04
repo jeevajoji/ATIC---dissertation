@@ -99,14 +99,44 @@ def run_ablation_study(
         if results:
             all_results[variant_name] = results.get("bpp_levels", {})
 
-    # Plot RD curves across all variants
-    try:
-        from atic.metrics import plot_rate_distortion_curves
-        plot_rate_distortion_curves(all_results)
-        print("\nRD curves saved to ablation_results/plots/")
-    except Exception as e:
-        print(f"Plotting skipped: {e}")
+            # ---------- VISUALIZATION LOGIC INJECTED HERE ----------
+            try:
+                import matplotlib.pyplot as plt
+                print(f"\n[Visualizing Reconstruction for {variant_name}]")
+                model.eval()
+                with torch.no_grad():
+                    # Get one batch from validation set
+                    batch = next(iter(val_loader))
+                    x = batch.to(device)
+                    outputs = model(x)
+                    x_hat = outputs["x_hat"]
 
+                    # Convert PyTorch tensors (C, H, W) to Numpy images (H, W, C)
+                    x_orig = x[0].cpu().clamp(0, 1).permute(1, 2, 0).numpy()
+                    x_recon = x_hat[0].cpu().clamp(0, 1).permute(1, 2, 0).numpy()
+
+                    # Plot side-by-side
+                    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+                    axes[0].imshow(x_orig)
+                    axes[0].set_title("Original Frame")
+                    axes[0].axis("off")
+
+                    axes[1].imshow(x_recon)
+                    axes[1].set_title(f"Reconstructed Frame ({variant_name})")
+                    axes[1].axis("off")
+                    
+                    plt.tight_layout()
+                    plt.show()
+                
+                # Update and display the RD curves incrementally
+                print(f"\n[Updating RD Plots with {variant_name}]")
+                from atic.metrics import plot_rate_distortion_curves
+                plot_rate_distortion_curves(all_results)
+            except Exception as e:
+                print(f"Plotting skipped/failed: {e}")
+            # --------------------------------------------------------
+
+    print("\nAblation study completed. All RD curves saved to ablation_results/plots/")
     return all_results
 
 
