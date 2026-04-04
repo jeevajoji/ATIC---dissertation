@@ -3,7 +3,11 @@ ablation.py — ATIC Ablation Study Runner
 Each variant is trained at multiple lambda_rate values to produce
 a real rate-distortion curve (one point per lambda, not mocked).
 """
+import csv
 import os
+from dataclasses import asdict
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import matplotlib.pyplot as plt
 
@@ -11,8 +15,14 @@ from atic.config  import ArchitectureConfig
 from atic.model   import ATICModel
 from atic.train   import train_loop
 from atic.eval    import eval_single
-from atic.dataset import get_video_dataloaders
+from atic.dataset import build_and_save_split_manifests, get_video_dataloaders
 from atic.metrics import plot_rate_distortion_curves
+from atic.repro import (
+    get_environment_snapshot,
+    set_global_determinism,
+    utc_timestamp,
+    write_json,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +82,16 @@ LAMBDA_RATES = [0.001, 0.005, 0.01, 0.05, 0.1]
 # ---------------------------------------------------------------------------
 # Visualisation helper
 # ---------------------------------------------------------------------------
-def visualise_reconstruction(model, val_loader, variant_name, lam, device):
+def visualise_reconstruction(
+    model,
+    val_loader,
+    variant_name,
+    lam,
+    seed,
+    device,
+    save_path,
+    show=False,
+):
     try:
         model.eval()
         with torch.no_grad():
@@ -84,12 +103,51 @@ def visualise_reconstruction(model, val_loader, variant_name, lam, device):
 
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
         axes[0].imshow(x_orig);  axes[0].set_title("Original");         axes[0].axis("off")
-        axes[1].imshow(x_recon); axes[1].set_title(f"{variant_name} λ={lam}"); axes[1].axis("off")
+        axes[1].imshow(x_recon); axes[1].set_title(f"{variant_name} lam={lam} seed={seed}"); axes[1].axis("off")
         plt.tight_layout()
-        plt.savefig(f"ablation_results/{variant_name}_lam{lam}_recon.png", dpi=150)
-        plt.show()
+        plt.savefig(save_path, dpi=150)
+        if show:
+            plt.show()
+        plt.close(fig)
     except Exception as e:
         print(f"Visualisation skipped: {e}")
+
+
+def _write_summary_csv(csv_path: str, rows: List[Dict]) -> None:
+    if not rows:
+        return
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    fieldnames = sorted(rows[0].keys())
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _aggregate_points_by_variant_lambda(
+    points_by_variant_lambda: Dict[Tuple[str, float], List[Dict]],
+) -> Dict[str, Dict[float, Dict]]:
+    """Aggregate repeated seed runs into mean RD points for plotting."""
+    payload: Dict[str, Dict[float, Dict]] = {}
+
+    for (variant_name, lam), points in points_by_variant_lambda.items():
+        if not points:
+            continue
+
+        mean_point: Dict[str, float] = {}
+        metric_keys = set().union(*(p.keys() for p in points))
+        for key in metric_keys:
+            vals = [p[key] for p in points if key in p]
+            if vals:
+                mean_point[key] = float(sum(vals) / len(vals))
+
+        bpp_key = round(mean_point.get("BPP", lam), 4)
+        payload.setdefault(variant_name, {})
+        while bpp_key in payload[variant_name]:
+            bpp_key = round(bpp_key + 1e-4, 4)
+        payload[variant_name][bpp_key] = mean_point
+
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -101,77 +159,183 @@ def run_ablation_study(
     device: str      = "cuda",
     # Set to a list of variant names to run only those, e.g. ["A1_Baseline", "A6_FullATIC"]
     run_variants     = None,
+    seeds: Optional[List[int]] = None,
+    output_root: str = "ablation_results/runs",
+    study_name: str = "atic_ablation",
+    val_every: int = 10,
 ):
-    os.makedirs("ablation_results/plots", exist_ok=True)
+    if seeds is None:
+        seeds = [42]
 
-    torch.manual_seed(42)
     device = device if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
-
-    train_loader, val_loader = get_video_dataloaders(
-        video_dir=video_path, batch_size=1
-    )
-    if train_loader is None:
-        print("No frames found. Check video_path.")
-        return
-
-    # all_results[variant_name][bpp_value] = metrics_dict
-    # This is the format plot_rate_distortion_curves expects.
-    all_results = {}
 
     variants_to_run = {
         k: v for k, v in ABLATION_VARIANTS.items()
         if run_variants is None or k in run_variants
     }
 
-    for variant_name, config in variants_to_run.items():
-        print(f"\n{'='*55}")
-        print(f"Variant: {variant_name}")
-        print(f"{'='*55}")
+    study_dir = os.path.join(output_root, f"{study_name}_{utc_timestamp()}")
+    runs_dir = os.path.join(study_dir, "runs")
+    plots_dir = os.path.join(study_dir, "plots")
+    manifests_dir = os.path.join(study_dir, "manifests")
+    os.makedirs(runs_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
 
-        all_results[variant_name] = {}
+    train_manifest, val_manifest = build_and_save_split_manifests(
+        video_dir=video_path,
+        manifest_dir=manifests_dir,
+        val_every=val_every,
+    )
+    if train_manifest is None or val_manifest is None:
+        print("No frames found. Check video_path.")
+        return
 
-        for lam in LAMBDA_RATES:
-            print(f"\n  --- lambda = {lam} ---")
+    write_json(
+        os.path.join(study_dir, "study_config.json"),
+        {
+            "study_name": study_name,
+            "video_path": os.path.abspath(video_path),
+            "epochs": epochs,
+            "device": device,
+            "seeds": seeds,
+            "val_every": val_every,
+            "lambdas": LAMBDA_RATES,
+            "variants": {
+                variant_name: asdict(config)
+                for variant_name, config in variants_to_run.items()
+            },
+            "manifests": {
+                "train": train_manifest,
+                "val": val_manifest,
+            },
+            "environment": get_environment_snapshot(device=device, repo_dir=os.getcwd()),
+        },
+    )
 
-            # Fresh model for every (variant, lambda) combination.
-            # This is essential — each point on the RD curve is a separately
-            # trained model optimised for a different rate-distortion tradeoff.
-            model = ATICModel(config, H=1088, W=1920).to(device)
+    summary_rows: List[Dict] = []
+    points_by_variant_lambda: Dict[Tuple[str, float], List[Dict]] = {}
+    summary_csv_path = os.path.join(study_dir, "summary_metrics.csv")
+    summary_json_path = os.path.join(study_dir, "summary_metrics.json")
 
-            train_loop(
-                model,
-                variant_name=f"{variant_name}_lam{lam}",
-                dataloader=train_loader,
-                epochs=epochs,
-                device=device,
-                lambda_rate=lam,
-            )
+    for seed in seeds:
+        set_global_determinism(seed=seed, deterministic=True)
 
-            # eval_single returns real BPP computed from likelihoods
-            point = eval_single(model, val_loader, device=device)
-            bpp_key = round(point.get("BPP", lam), 4)
-            all_results[variant_name][bpp_key] = point
+        train_loader, val_loader = get_video_dataloaders(
+            video_dir=video_path,
+            batch_size=1,
+            train_manifest=train_manifest,
+            val_manifest=val_manifest,
+            seed=seed,
+        )
+        if train_loader is None or val_loader is None:
+            print("Could not build dataloaders from manifests.")
+            return
 
-            print(f"  BPP={bpp_key:.4f} | "
-                  f"PSNR={point.get('PSNR',0):.2f} | "
-                  f"SSIM={point.get('SSIM',0):.4f} | "
-                  f"LPIPS={point.get('LPIPS',0):.4f}")
+        for variant_name, config in variants_to_run.items():
+            print(f"\n{'='*55}")
+            print(f"Seed: {seed} | Variant: {variant_name}")
+            print(f"{'='*55}")
 
-            # Show reconstruction for every lambda and variant (at the end of epochs)
-            visualise_reconstruction(model, val_loader, variant_name, lam, device)
+            for lam in LAMBDA_RATES:
+                print(f"\n  --- lambda = {lam} ---")
 
-            # Incremental RD plot after each lambda
-            try:
-                plot_rate_distortion_curves(all_results)
-            except Exception as e:
-                print(f"Incremental plot skipped: {e}")
+                run_dir = os.path.join(
+                    runs_dir,
+                    variant_name,
+                    f"lam_{lam}",
+                    f"seed_{seed}",
+                )
+                os.makedirs(run_dir, exist_ok=True)
+                write_json(
+                    os.path.join(run_dir, "run_config.json"),
+                    {
+                        "variant": variant_name,
+                        "lambda_rate": lam,
+                        "seed": seed,
+                        "epochs": epochs,
+                        "architecture": asdict(config),
+                        "device": device,
+                        "manifest_paths": {
+                            "train": train_manifest,
+                            "val": val_manifest,
+                        },
+                    },
+                )
 
-            del model
-            torch.cuda.empty_cache()
+                write_json(
+                    os.path.join(run_dir, "environment.json"),
+                    get_environment_snapshot(device=device, repo_dir=os.getcwd()),
+                )
 
-    print("\nAll variants complete. RD curves saved to ablation_results/plots/")
-    return all_results
+                # Fresh model for every (variant, lambda, seed) combination.
+                model = ATICModel(config, H=1088, W=1920).to(device)
+
+                train_artifacts = train_loop(
+                    model,
+                    variant_name=f"{variant_name}_lam{lam}_seed{seed}",
+                    dataloader=train_loader,
+                    epochs=epochs,
+                    device=device,
+                    lambda_rate=lam,
+                    checkpoint_path=os.path.join(run_dir, "model.pth"),
+                    train_log_path=os.path.join(run_dir, "train_log.jsonl"),
+                )
+
+                point = eval_single(model, val_loader, device=device)
+                write_json(os.path.join(run_dir, "eval_metrics.json"), point)
+
+                bpp_key = round(point.get("BPP", lam), 4)
+                points_by_variant_lambda.setdefault((variant_name, lam), []).append(point)
+
+                print(
+                    f"  BPP={bpp_key:.4f} | "
+                    f"PSNR={point.get('PSNR', 0):.2f} | "
+                    f"SSIM={point.get('SSIM', 0):.4f} | "
+                    f"LPIPS={point.get('LPIPS', 0):.4f}"
+                )
+
+                visualise_reconstruction(
+                    model=model,
+                    val_loader=val_loader,
+                    variant_name=variant_name,
+                    lam=lam,
+                    seed=seed,
+                    device=device,
+                    save_path=os.path.join(run_dir, "reconstruction.png"),
+                    show=False,
+                )
+
+                summary_row = {
+                    "variant": variant_name,
+                    "seed": seed,
+                    "lambda_rate": lam,
+                    "checkpoint_path": train_artifacts.get("checkpoint_path"),
+                }
+                summary_row.update(point)
+                summary_rows.append(summary_row)
+
+                _write_summary_csv(summary_csv_path, summary_rows)
+                write_json(summary_json_path, {"rows": summary_rows})
+
+                rd_payload = _aggregate_points_by_variant_lambda(points_by_variant_lambda)
+                try:
+                    plot_rate_distortion_curves(rd_payload, save_dir=plots_dir)
+                except Exception as e:
+                    print(f"Incremental plot skipped: {e}")
+
+                del model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+    final_payload = _aggregate_points_by_variant_lambda(points_by_variant_lambda)
+    write_json(os.path.join(study_dir, "rd_aggregate.json"), final_payload)
+    print(f"\nAll variants complete. Study artifacts saved to {study_dir}")
+    return {
+        "study_dir": study_dir,
+        "summary_rows": summary_rows,
+        "rd_payload": final_payload,
+    }
 
 
 if __name__ == "__main__":
@@ -180,4 +344,5 @@ if __name__ == "__main__":
     run_ablation_study(
         epochs=2,
         run_variants=["A1_Baseline", "A6_FullATIC"],
+        seeds=[42],
     )
