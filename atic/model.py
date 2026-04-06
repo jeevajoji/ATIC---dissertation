@@ -103,8 +103,11 @@ class ATICModel(nn.Module):
 
         # 4+5. Entropy
         likelihoods = None
+        hyper_hat = None
         if self.entropy is not None:
-            quantized_z, likelihoods = self.entropy(quantized_z)
+            entropy_output = self.entropy(quantized_z, return_aux=True)
+            quantized_z, likelihoods, aux = entropy_output
+            hyper_hat = aux.get("h_hat") if aux is not None else None
 
         # 6. Decode
         decoded_tokens = self.decoder(quantized_z)
@@ -117,4 +120,6 @@ class ATICModel(nn.Module):
             "likelihoods" : likelihoods,   # dict {"y", "z"} or None
             "attn_map"    : attn_map,
             "step_map"    : step_map,
+            "z_hat"       : quantized_z,
+            "hyper_hat"   : hyper_hat,
         }

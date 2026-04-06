@@ -17,7 +17,7 @@ Forward returns:
 import math
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 
 class SimpleHyperpriorEntropy(nn.Module):
@@ -43,7 +43,9 @@ class SimpleHyperpriorEntropy(nn.Module):
         )
 
     def forward(
-        self, z: torch.Tensor
+        self,
+        z: torch.Tensor,
+        return_aux: bool = False,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Args:
@@ -85,7 +87,13 @@ class SimpleHyperpriorEntropy(nn.Module):
         # a real implementation uses a non-parametric entropy model here)
         likelihoods_z = torch.full_like(h_hat, 0.1)
 
-        return z_hat, {"y": likelihoods_y, "z": likelihoods_z}
+        likelihoods = {"y": likelihoods_y, "z": likelihoods_z}
+        if return_aux:
+            aux: Dict[str, Optional[torch.Tensor]] = {
+                "h_hat": h_hat,
+            }
+            return z_hat, likelihoods, aux
+        return z_hat, likelihoods
 
     @staticmethod
     def _gaussian_likelihood(

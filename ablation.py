@@ -2,7 +2,16 @@
 ablation.py — ATIC Ablation Study Runner
 Each variant is trained at multiple lambda_rate values to produce
 a real rate-distortion curve (one point per lambda, not mocked).
+
+Kaggle-friendly usage (no code edits required):
+    python ablation.py --epochs 10 --batch-size 4 --lambdas 0.001,0.01,0.1
+
+Environment variable equivalents are also supported, e.g.:
+    ATIC_EPOCHS=10
+    ATIC_BATCH_SIZE=4
+    ATIC_LAMBDAS=0.001,0.01,0.1
 """
+import argparse
 import csv
 import os
 from dataclasses import asdict
@@ -77,6 +86,112 @@ ABLATION_VARIANTS = {
 # Lower lambda  → model uses more bits → higher quality (high BPP, high PSNR)
 # Higher lambda → model uses fewer bits → lower quality (low BPP, low PSNR)
 LAMBDA_RATES = [0.001, 0.005, 0.01, 0.05, 0.1]
+
+
+def _env_or_default(name: str, default: str) -> str:
+    value = os.getenv(name)
+    return default if value is None or value.strip() == "" else value
+
+
+def _parse_csv_str_list(raw: Optional[str]) -> Optional[List[str]]:
+    if raw is None:
+        return None
+    values = [v.strip() for v in raw.split(",") if v.strip()]
+    return values if values else None
+
+
+def _parse_csv_int_list(raw: Optional[str], fallback: List[int]) -> List[int]:
+    values = _parse_csv_str_list(raw)
+    if values is None:
+        return fallback
+    return [int(v) for v in values]
+
+
+def _parse_csv_float_list(raw: Optional[str], fallback: List[float]) -> List[float]:
+    values = _parse_csv_str_list(raw)
+    if values is None:
+        return fallback
+    return [float(v) for v in values]
+
+
+def _parse_bool(raw: str) -> bool:
+    val = raw.strip().lower()
+    if val in {"1", "true", "yes", "y", "on"}:
+        return True
+    if val in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Cannot parse boolean value from: {raw}")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run ATIC ablation with CLI/env configurable hyperparameters.",
+    )
+    parser.add_argument(
+        "--video-path",
+        default=_env_or_default("ATIC_VIDEO_PATH", "/kaggle/input/datasets/jeevajoji/uvg-honeybee"),
+        help="Directory containing PNG frames.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=int(_env_or_default("ATIC_EPOCHS", "2")),
+        help="Training epochs per variant/lambda/seed.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=int(_env_or_default("ATIC_BATCH_SIZE", "1")),
+        help="Training batch size.",
+    )
+    parser.add_argument(
+        "--device",
+        default=_env_or_default("ATIC_DEVICE", "cuda"),
+        help="Target device (cuda or cpu).",
+    )
+    parser.add_argument(
+        "--variants",
+        default=_env_or_default("ATIC_VARIANTS", ""),
+        help="Comma-separated variant names (empty = all).",
+    )
+    parser.add_argument(
+        "--seeds",
+        default=_env_or_default("ATIC_SEEDS", "42"),
+        help="Comma-separated seeds, e.g. 42,123,999.",
+    )
+    parser.add_argument(
+        "--lambdas",
+        default=_env_or_default("ATIC_LAMBDAS", ",".join(str(x) for x in LAMBDA_RATES)),
+        help="Comma-separated lambda rates, e.g. 0.001,0.01,0.1.",
+    )
+    parser.add_argument(
+        "--output-root",
+        default=_env_or_default("ATIC_OUTPUT_ROOT", "ablation_results/runs"),
+        help="Root directory for study outputs.",
+    )
+    parser.add_argument(
+        "--study-name",
+        default=_env_or_default("ATIC_STUDY_NAME", "atic_ablation"),
+        help="Study name prefix for output folder.",
+    )
+    parser.add_argument(
+        "--val-every",
+        type=int,
+        default=int(_env_or_default("ATIC_VAL_EVERY", "10")),
+        help="Use every Nth frame for validation split.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=int(_env_or_default("ATIC_NUM_WORKERS", "2")),
+        help="DataLoader worker count.",
+    )
+    parser.add_argument(
+        "--pin-memory",
+        default=_env_or_default("ATIC_PIN_MEMORY", "true"),
+        help="Pin DataLoader memory (true/false).",
+    )
+    return parser
 
 
 # ---------------------------------------------------------------------------
@@ -156,16 +271,22 @@ def _aggregate_points_by_variant_lambda(
 def run_ablation_study(
     video_path: str  = "/kaggle/input/datasets/jeevajoji/uvg-honeybee",
     epochs: int      = 2,
+    batch_size: int  = 1,
     device: str      = "cuda",
     # Set to a list of variant names to run only those, e.g. ["A1_Baseline", "A6_FullATIC"]
     run_variants     = None,
+    lambda_rates: Optional[List[float]] = None,
     seeds: Optional[List[int]] = None,
     output_root: str = "ablation_results/runs",
     study_name: str = "atic_ablation",
     val_every: int = 10,
+    num_workers: int = 2,
+    pin_memory: bool = True,
 ):
     if seeds is None:
         seeds = [42]
+    if lambda_rates is None:
+        lambda_rates = LAMBDA_RATES
 
     device = device if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
@@ -174,6 +295,12 @@ def run_ablation_study(
         k: v for k, v in ABLATION_VARIANTS.items()
         if run_variants is None or k in run_variants
     }
+    if run_variants is not None:
+        missing = [v for v in run_variants if v not in ABLATION_VARIANTS]
+        if missing:
+            raise ValueError(
+                f"Unknown variant(s): {missing}. Available: {list(ABLATION_VARIANTS.keys())}"
+            )
 
     study_dir = os.path.join(output_root, f"{study_name}_{utc_timestamp()}")
     runs_dir = os.path.join(study_dir, "runs")
@@ -197,10 +324,13 @@ def run_ablation_study(
             "study_name": study_name,
             "video_path": os.path.abspath(video_path),
             "epochs": epochs,
+            "batch_size": batch_size,
             "device": device,
             "seeds": seeds,
             "val_every": val_every,
-            "lambdas": LAMBDA_RATES,
+            "num_workers": num_workers,
+            "pin_memory": pin_memory,
+            "lambdas": lambda_rates,
             "variants": {
                 variant_name: asdict(config)
                 for variant_name, config in variants_to_run.items()
@@ -223,9 +353,11 @@ def run_ablation_study(
 
         train_loader, val_loader = get_video_dataloaders(
             video_dir=video_path,
-            batch_size=1,
+            batch_size=batch_size,
             train_manifest=train_manifest,
             val_manifest=val_manifest,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
             seed=seed,
         )
         if train_loader is None or val_loader is None:
@@ -237,7 +369,7 @@ def run_ablation_study(
             print(f"Seed: {seed} | Variant: {variant_name}")
             print(f"{'='*55}")
 
-            for lam in LAMBDA_RATES:
+            for lam in lambda_rates:
                 print(f"\n  --- lambda = {lam} ---")
 
                 run_dir = os.path.join(
@@ -254,6 +386,7 @@ def run_ablation_study(
                         "lambda_rate": lam,
                         "seed": seed,
                         "epochs": epochs,
+                        "batch_size": batch_size,
                         "architecture": asdict(config),
                         "device": device,
                         "manifest_paths": {
@@ -282,7 +415,12 @@ def run_ablation_study(
                     train_log_path=os.path.join(run_dir, "train_log.jsonl"),
                 )
 
-                point = eval_single(model, val_loader, device=device)
+                point = eval_single(
+                    model,
+                    val_loader,
+                    device=device,
+                    bitstream_dir=os.path.join(run_dir, "bitstreams"),
+                )
                 write_json(os.path.join(run_dir, "eval_metrics.json"), point)
 
                 bpp_key = round(point.get("BPP", lam), 4)
@@ -339,10 +477,24 @@ def run_ablation_study(
 
 
 if __name__ == "__main__":
-    # Quick test: run only A1 and A6 with 3 lambdas to validate pipeline
-    # then swap run_variants=None for the full study
+    args = build_arg_parser().parse_args()
+
+    variants = _parse_csv_str_list(args.variants)
+    seeds = _parse_csv_int_list(args.seeds, fallback=[42])
+    lambdas = _parse_csv_float_list(args.lambdas, fallback=LAMBDA_RATES)
+    pin_memory = _parse_bool(args.pin_memory)
+
     run_ablation_study(
-        epochs=2,
-        run_variants=["A1_Baseline", "A6_FullATIC"],
-        seeds=[42],
+        video_path=args.video_path,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        device=args.device,
+        run_variants=variants,
+        lambda_rates=lambdas,
+        seeds=seeds,
+        output_root=args.output_root,
+        study_name=args.study_name,
+        val_every=args.val_every,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
     )

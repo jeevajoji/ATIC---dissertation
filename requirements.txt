@@ -1,4 +1,12 @@
-compressai
+# Pinned direct dependencies for reproducible installs.
+# Full transitive lock is tracked in requirements.lock.txt.
+compressai==1.2.8
+lpips==0.1.4
+matplotlib==3.10.8
+numpy==1.26.4
+pillow==12.2.0
+piq==0.8.0
 timm==0.6.13
-lpips
-piq
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+tqdm==4.67.3
