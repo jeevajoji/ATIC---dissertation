@@ -38,42 +38,42 @@ from atic.repro import (
 # Ablation variant definitions  (A1 = true baseline, A6 = full ATIC)
 # ---------------------------------------------------------------------------
 ABLATION_VARIANTS = {
-    "A1_Baseline": ArchitectureConfig(
+    "Baseline": ArchitectureConfig(
         use_overlapping_patches=False,
         use_sag=False,
         use_cbam=False,
         use_adaptive_quant=False,
         use_hyperprior=False,
     ),
-    "A2_Overlap": ArchitectureConfig(
-        use_overlapping_patches=True,
-        use_sag=False,
-        use_cbam=False,
-        use_adaptive_quant=False,
-        use_hyperprior=False,
-    ),
-    "A3_SAG": ArchitectureConfig(
-        use_overlapping_patches=True,
-        use_sag=True,
-        use_cbam=False,
-        use_adaptive_quant=False,
-        use_hyperprior=False,
-    ),
-    "A4_CBAM": ArchitectureConfig(
-        use_overlapping_patches=True,
+    "No_Overlap_Tokenizer": ArchitectureConfig(
+        use_overlapping_patches=False,
         use_sag=True,
         use_cbam=True,
-        use_adaptive_quant=False,
-        use_hyperprior=False,
+        use_adaptive_quant=True,
+        use_hyperprior=True,
     ),
-    "A5_AdaptiveQuant": ArchitectureConfig(
+    "No_CBAM": ArchitectureConfig(
+        use_overlapping_patches=True,
+        use_sag=True,
+        use_cbam=False,
+        use_adaptive_quant=True,
+        use_hyperprior=True,
+    ),
+    "No_SAG_and_AdaptQuant": ArchitectureConfig(
+        use_overlapping_patches=True,
+        use_sag=False,
+        use_cbam=True,
+        use_adaptive_quant=False,
+        use_hyperprior=True,
+    ),
+    "No_Hyperprior": ArchitectureConfig(
         use_overlapping_patches=True,
         use_sag=True,
         use_cbam=True,
         use_adaptive_quant=True,
         use_hyperprior=False,
     ),
-    "A6_FullATIC": ArchitectureConfig(
+    "Full_ATIC": ArchitectureConfig(
         use_overlapping_patches=True,
         use_sag=True,
         use_cbam=True,

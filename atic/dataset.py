@@ -18,9 +18,7 @@ class UVGVideoDataset(Dataset):
         self.image_paths = image_paths
         self.transform = T.Compose([
             T.ToTensor(),
-            # Pad height: 1080 → 1088 (next multiple of 8)
-            # Pad only the bottom edge — keeps spatial correspondence intact
-            T.Pad((0, 0, 0, 8)),
+            # Padding removed; assuming images are already CenterCropped to 512x512
         ])
 
     def __len__(self):
