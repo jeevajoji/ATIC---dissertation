@@ -136,12 +136,10 @@ class ATICModel(nn.Module):
         return loss
 
     def update(self, force: bool = False):
-        """
-        Updates entropy model CDF tables when required.
-        Useful before final evaluation/compression.
-        """
         updated = False
         for module in self.modules():
+            if module is self:
+                continue
             if hasattr(module, "update"):
                 try:
                     updated = module.update(force=force) or updated
