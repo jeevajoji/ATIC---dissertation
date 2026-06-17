@@ -136,13 +136,25 @@ class ATICModel(nn.Module):
         return loss
 
     def update(self, force: bool = False):
+        """
+        Updates entropy model CDF tables.
+
+        For current ATIC likelihood-based BPP evaluation, only EntropyBottleneck
+        needs update. GaussianConditional(None) may fail because no scale table
+        is provided, so we skip it safely.
+        """
+        from compressai.entropy_models import EntropyBottleneck
+
         updated = False
+
         for module in self.modules():
             if module is self:
                 continue
-            if hasattr(module, "update"):
+
+            if isinstance(module, EntropyBottleneck):
                 try:
                     updated = module.update(force=force) or updated
                 except TypeError:
                     updated = module.update() or updated
+
         return updated
