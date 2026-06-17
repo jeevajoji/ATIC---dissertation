@@ -1,0 +1,9 @@
+python ablation.py \
+  --video-path /kaggle/input/datasets/jeevajoji/uvg-honeybee-512x512/honeybee_512_crop \
+  --height 512 \
+  --width 512 \
+  --epochs 20 \
+  --batch-size 1 \
+  --lambdas 0.0018,0.0067,0.025 \
+  --variants Baseline,No_Overlap,No_CBAM,No_AdaptiveQuant,Full_ATIC \
+  --study-name honeybee_atic_compressai

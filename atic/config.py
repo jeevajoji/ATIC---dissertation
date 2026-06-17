@@ -1,14 +1,13 @@
 """
 config.py — ATIC Architecture Configuration
-Controls which components are active for each ablation stage.
 
-Ablation ladder:
-    A1: no overlap, no SAG, no CBAM, no hyperprior  ← true baseline
-    A2: + overlapping patches
-    A3: + SAG
-    A4: + CBAM
-    A5: + adaptive quantizer  (SAG map fed to quantizer)
-    A6: + hyperprior           ← full ATIC
+For the publication/dissertation version:
+    All variants use CompressAI hyperprior entropy modelling.
+    Ablations focus on:
+        - overlapping patches
+        - SAG
+        - CBAM
+        - adaptive quantisation/gain
 """
 from dataclasses import dataclass, field
 from typing import List

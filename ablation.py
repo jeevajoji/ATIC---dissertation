@@ -43,9 +43,9 @@ ABLATION_VARIANTS = {
         use_sag=False,
         use_cbam=False,
         use_adaptive_quant=False,
-        use_hyperprior=False,
+        use_hyperprior=True,
     ),
-    "No_Overlap_Tokenizer": ArchitectureConfig(
+    "No_Overlap": ArchitectureConfig(
         use_overlapping_patches=False,
         use_sag=True,
         use_cbam=True,
@@ -59,19 +59,12 @@ ABLATION_VARIANTS = {
         use_adaptive_quant=True,
         use_hyperprior=True,
     ),
-    "No_SAG_and_AdaptQuant": ArchitectureConfig(
-        use_overlapping_patches=True,
-        use_sag=False,
-        use_cbam=True,
-        use_adaptive_quant=False,
-        use_hyperprior=True,
-    ),
-    "No_Hyperprior": ArchitectureConfig(
+    "No_AdaptiveQuant": ArchitectureConfig(
         use_overlapping_patches=True,
         use_sag=True,
         use_cbam=True,
-        use_adaptive_quant=True,
-        use_hyperprior=False,
+        use_adaptive_quant=False,
+        use_hyperprior=True,
     ),
     "Full_ATIC": ArchitectureConfig(
         use_overlapping_patches=True,
@@ -85,7 +78,7 @@ ABLATION_VARIANTS = {
 # Each lambda produces one point on the RD curve.
 # Lower lambda  → model uses more bits → higher quality (high BPP, high PSNR)
 # Higher lambda → model uses fewer bits → lower quality (low BPP, low PSNR)
-LAMBDA_RATES = [0.001, 0.005, 0.01, 0.05, 0.1]
+LAMBDA_RATES = [0.001, 0.01, 0.1]
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -191,6 +184,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=_env_or_default("ATIC_PIN_MEMORY", "true"),
         help="Pin DataLoader memory (true/false).",
     )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=int(_env_or_default("ATIC_HEIGHT", "512")),
+        help="Training/evaluation image height.",
+    )
+
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=int(_env_or_default("ATIC_WIDTH", "512")),
+        help="Training/evaluation image width.",
+    )
     return parser
 
 
@@ -282,6 +288,9 @@ def run_ablation_study(
     val_every: int = 10,
     num_workers: int = 2,
     pin_memory: bool = True,
+    height: int = 512,
+    width: int = 512,
+
 ):
     if seeds is None:
         seeds = [42]
@@ -402,12 +411,13 @@ def run_ablation_study(
                 )
 
                 # Fresh model for every (variant, lambda, seed) combination.
-                model = ATICModel(config, H=1088, W=1920).to(device)
+                model = ATICModel(config, H=height, W=width).to(device)
 
                 train_artifacts = train_loop(
                     model,
                     variant_name=f"{variant_name}_lam{lam}_seed{seed}",
-                    dataloader=train_loader,
+                    dataloader=train_loader,\
+                    val_loader=val_loader,
                     epochs=epochs,
                     device=device,
                     lambda_rate=lam,
@@ -497,4 +507,6 @@ if __name__ == "__main__":
         val_every=args.val_every,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
+        height=args.height,
+        width=args.width
     )
