@@ -1,6 +1,6 @@
 ﻿import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import torch
 import torch.optim as optim
@@ -27,6 +27,79 @@ def _extract_images(batch):
     if isinstance(batch, (list, tuple)):
         return batch[0]
     return batch
+
+
+@torch.no_grad()
+def save_reconstruction_comparison(
+    model,
+    dataloader,
+    device: str,
+    save_path: str,
+    title: str = "Reconstruction",
+):
+    """
+    Saves original vs reconstructed image comparison.
+
+    Used after each epoch to visually monitor reconstruction progress.
+
+    This function saves:
+        - epoch-specific preview image
+        - latest/final reconstruction image, depending on caller path
+    """
+    if dataloader is None:
+        return
+
+    import matplotlib.pyplot as plt
+
+    model.eval()
+
+    try:
+        batch = next(iter(dataloader))
+        batch = _extract_images(batch).to(device, non_blocking=True)
+
+        outputs = model(batch)
+        x_hat = outputs["x_hat"]
+
+        x_orig = (
+            batch[0]
+            .detach()
+            .cpu()
+            .clamp(0, 1)
+            .permute(1, 2, 0)
+            .numpy()
+        )
+
+        x_recon = (
+            x_hat[0]
+            .detach()
+            .cpu()
+            .clamp(0, 1)
+            .permute(1, 2, 0)
+            .numpy()
+        )
+
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        axes[0].imshow(x_orig)
+        axes[0].set_title("Original")
+        axes[0].axis("off")
+
+        axes[1].imshow(x_recon)
+        axes[1].set_title(title)
+        axes[1].axis("off")
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        print(f"Saved reconstruction preview: {save_path}")
+
+    except Exception as e:
+        print(f"Reconstruction preview skipped: {e}")
+
+    model.train()
 
 
 def configure_optimizers(
@@ -135,6 +208,8 @@ def train_loop(
     learning_rate: float = 1e-4,
     aux_learning_rate: float = 1e-3,
     grad_clip_norm: float = 1.0,
+    reconstruction_path: Optional[str] = None,
+    save_reconstruction_each_epoch: bool = True,
 ):
     """
     Trains ATIC model.
@@ -144,6 +219,16 @@ def train_loop(
         - uses auxiliary optimizer for entropy bottleneck quantiles
         - calls model.aux_loss() when available
         - calls model.update(force=True) before saving when available
+
+    Reconstruction previews:
+        If save_reconstruction_each_epoch=True, this saves:
+            run_dir/epoch_previews/epoch_001.png
+            run_dir/epoch_previews/epoch_002.png
+            ...
+            run_dir/reconstruction.png
+
+        reconstruction.png is overwritten every epoch and therefore always
+        contains the latest/final reconstruction preview.
 
     Args:
         model:
@@ -170,6 +255,10 @@ def train_loop(
             Entropy bottleneck auxiliary LR.
         grad_clip_norm:
             Gradient clipping threshold.
+        reconstruction_path:
+            Path to latest/final reconstruction image.
+        save_reconstruction_each_epoch:
+            Whether to save reconstruction preview after every epoch.
 
     Returns:
         {
@@ -335,6 +424,46 @@ def train_loop(
                 f" | Aux: {epoch_avg['aux_loss']:.4f}"
                 f"{val_msg}"
             )
+
+            # -------------------------------------------------
+            # Save reconstruction preview after every epoch
+            # -------------------------------------------------
+            if save_reconstruction_each_epoch:
+                preview_loader = val_loader if val_loader is not None else dataloader
+
+                if checkpoint_path is not None:
+                    run_dir = os.path.dirname(checkpoint_path)
+                else:
+                    run_dir = "ablation_results"
+
+                # 1. Save epoch-specific preview for inspection
+                epoch_preview_path = os.path.join(
+                    run_dir,
+                    "epoch_previews",
+                    f"epoch_{epoch + 1:03d}.png",
+                )
+
+                save_reconstruction_comparison(
+                    model=model,
+                    dataloader=preview_loader,
+                    device=device,
+                    save_path=epoch_preview_path,
+                    title=f"{variant_name} | epoch {epoch + 1}",
+                )
+
+                # 2. Also overwrite latest/final reconstruction.png
+                latest_preview_path = reconstruction_path or os.path.join(
+                    run_dir,
+                    "reconstruction.png",
+                )
+
+                save_reconstruction_comparison(
+                    model=model,
+                    dataloader=preview_loader,
+                    device=device,
+                    save_path=latest_preview_path,
+                    title=f"{variant_name} | latest epoch {epoch + 1}",
+                )
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
