@@ -84,7 +84,16 @@ def hash_model_state(model: torch.nn.Module) -> str:
         update_framed(name.encode("utf-8"))
         update_framed(str(value.dtype).encode("ascii"))
         update_framed(json.dumps(list(value.shape)).encode("ascii"))
-        update_framed(value.view(torch.uint8).numpy().tobytes(order="C"))
+        # ``view(torch.uint8)`` rejects zero-dimensional tensors when the
+        # element sizes differ. Flatten first so scalar integer buffers (for
+        # example entropy-model counters) have a byte-addressable dimension.
+        raw_bytes = (
+            value.reshape(-1)
+            .view(torch.uint8)
+            .numpy()
+            .tobytes(order="C")
+        )
+        update_framed(raw_bytes)
     return digest.hexdigest()
 
 

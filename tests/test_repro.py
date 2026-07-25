@@ -62,6 +62,22 @@ class ReproducibilityTests(unittest.TestCase):
             second.weight[0, 0] += 1
         self.assertNotEqual(hash_model_state(first), hash_model_state(second))
 
+    def test_model_state_hash_supports_scalar_integer_buffers(self):
+        class ModelWithScalarBuffer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer(
+                    "counter",
+                    torch.tensor(7, dtype=torch.long),
+                )
+
+        first = ModelWithScalarBuffer()
+        second = ModelWithScalarBuffer()
+        self.assertEqual(hash_model_state(first), hash_model_state(second))
+
+        second.counter.add_(1)
+        self.assertNotEqual(hash_model_state(first), hash_model_state(second))
+
 
 if __name__ == "__main__":
     unittest.main()
