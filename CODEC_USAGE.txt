@@ -115,7 +115,13 @@ Reported fields include:
 - BPP and BPP_actual: complete-file bitrate;
 - BPP_payload: z+y entropy payload bitrate;
 - BPP_estimated: likelihood estimate retained for calibration;
-- bitstream_bytes and payload_bytes; and
+- y_bpp_actual, z_bpp_actual, and header_bpp;
+- z_fraction: z bytes divided by complete .atic file bytes;
+- BPP_payload_minus_estimated: signed entropy-coder calibration gap, excluding
+  the fixed header;
+- BPP_actual_minus_estimated: signed complete-file versus estimated gap,
+  including the fixed header;
+- bitstream_bytes, payload_bytes, y_bytes, z_bytes, and header_bytes; and
 - reconstruction metrics computed from decompressed images.
 
 The existing archived 36 experiments remain likelihood-only historical
@@ -125,3 +131,36 @@ Their checkpoints were also trained while the old encoder-only SAG map was
 blended into adaptive gain. They can be used for codec smoke tests, but the
 decoder-synchronised model must be retrained before its rate-distortion numbers
 are compared with those archived experiments.
+
+
+DSAD causal pilot
+-----------------
+
+The controlled novelty comparison uses:
+
+- Full_ATIC_NoDSAD: decoder-synchronised student gain, beta_max=0;
+- Full_ATIC_DSAD: the identical architecture, with beta_max set by
+  --dsad-beta-max.
+
+Historical names such as Full_ATIC remain available for reproducing old
+architecture ablations, but they are not causal evidence for DSAD.
+
+Run only a tiny integration pilot first:
+
+python ablation.py \
+  --video-path /path/to/pilot/frames \
+  --variants Full_ATIC_NoDSAD,Full_ATIC_DSAD \
+  --epochs 2 \
+  --lambdas 0.0067 \
+  --seeds 42 \
+  --dsad-beta-max 0.05 \
+  --dsad-warmup-fraction 0.20 \
+  --dsad-ramp-fraction 0.10
+
+This pilot checks that training, logging, checkpointing, real entropy coding,
+and evaluation complete. With this two-epoch schedule, epoch 1 uses beta=0 and
+epoch 2 uses beta=0.05. It is not a dissertation or paper result. Do not start
+a long multi-rate/multi-seed run until train, validation, and independent test
+manifests are leakage-free and frozen. The eventual paper comparison must use
+the same data, seed, lambda, epochs, optimizer, and architecture for both causal
+arms, with only beta_max differing.

@@ -1,5 +1,7 @@
 ﻿import json
+import math
 import os
+import warnings
 from typing import Any, Dict, Optional
 
 import torch
@@ -8,6 +10,95 @@ from tqdm import tqdm
 
 from atic.bitstream import sha256_file
 from atic.losses import ATICLoss
+
+
+LOSS_LOG_KEYS = (
+    "loss",
+    "rd_loss",
+    "bpp_loss",
+    "total_bpp",
+    "y_bpp",
+    "z_bpp",
+    "mse_loss",
+    "scaled_mse_loss",
+    "ssim_loss",
+    "weighted_ssim_loss",
+    "lpips_loss",
+    "weighted_lpips_loss",
+    "dsad_loss",
+    "weighted_dsad_loss",
+    "dsad_mae",
+    "dsad_cosine",
+    "beta",
+    "student_gain_min",
+    "student_gain_max",
+    "student_gain_mean",
+    "student_gain_geomean",
+    "student_gain_std",
+    "teacher_spatial_std",
+)
+
+
+def dsad_beta_for_epoch(
+    epoch: int,
+    total_epochs: int,
+    beta_max: float,
+    warmup_fraction: float = 0.20,
+    ramp_fraction: float = 0.10,
+) -> float:
+    """Return the DSAD weight for a zero-based epoch.
+
+    The first ``warmup_fraction`` of epochs use zero DSAD weight, the next
+    ``ramp_fraction`` linearly ramp to ``beta_max``, and all remaining epochs
+    use ``beta_max``. A one-epoch pilot uses ``beta_max`` so it actually
+    exercises DSAD rather than becoming an accidental no-DSAD experiment.
+    """
+
+    if total_epochs <= 0:
+        raise ValueError("total_epochs must be positive")
+    if epoch < 0 or epoch >= total_epochs:
+        raise ValueError(
+            f"epoch must be in [0, {total_epochs}); received {epoch}"
+        )
+    if not math.isfinite(beta_max) or beta_max < 0:
+        raise ValueError("beta_max must be a finite, non-negative scalar")
+    if (
+        not math.isfinite(warmup_fraction)
+        or not math.isfinite(ramp_fraction)
+        or warmup_fraction < 0
+        or ramp_fraction < 0
+        or warmup_fraction + ramp_fraction > 1
+    ):
+        raise ValueError(
+            "DSAD warmup/ramp fractions must be finite, non-negative, "
+            "and sum to at most 1"
+        )
+    if beta_max == 0:
+        return float(beta_max)
+    if total_epochs == 1:
+        return float(beta_max)
+
+    # Allocate whole epochs while reserving room for the positive-DSAD phase.
+    # A non-zero warm-up always receives at least one epoch in a multi-epoch
+    # run, which makes the documented two-epoch pilot [0, beta_max].  Capping
+    # the ramp by the remaining epochs prevents rounded counts from overflowing
+    # short runs and guarantees that the last epoch reaches beta_max.
+    warmup_epochs = 0
+    if warmup_fraction > 0:
+        warmup_epochs = max(1, math.floor(total_epochs * warmup_fraction))
+        warmup_epochs = min(warmup_epochs, total_epochs - 1)
+
+    if epoch < warmup_epochs:
+        return 0.0
+
+    if ramp_fraction == 0:
+        return float(beta_max)
+
+    remaining_epochs = total_epochs - warmup_epochs
+    ramp_epochs = max(1, math.ceil(total_epochs * ramp_fraction))
+    ramp_epochs = min(ramp_epochs, remaining_epochs)
+    ramp_step = epoch - warmup_epochs + 1
+    return float(beta_max) * min(ramp_step / ramp_epochs, 1.0)
 
 
 def _append_jsonl(file_path: str, payload: Dict[str, Any]) -> None:
@@ -153,6 +244,7 @@ def validate_loop(
     dataloader,
     criterion,
     device: str = "cuda",
+    beta: float = 0.0,
 ) -> Optional[Dict[str, float]]:
     """
     Optional validation loop.
@@ -165,26 +257,17 @@ def validate_loop(
 
     model.eval()
 
-    totals = {
-        "val_loss": 0.0,
-        "val_bpp_loss": 0.0,
-        "val_mse_loss": 0.0,
-        "val_ssim_loss": 0.0,
-        "val_lpips_loss": 0.0,
-    }
+    totals = {f"val_{key}": 0.0 for key in LOSS_LOG_KEYS}
     steps = 0
 
     for batch in dataloader:
         batch = _extract_images(batch).to(device, non_blocking=True)
 
         outputs = model(batch)
-        loss_dict = criterion(outputs, batch)
+        loss_dict = criterion(outputs, batch, beta=beta)
 
-        totals["val_loss"] += float(loss_dict["loss"].item())
-        totals["val_bpp_loss"] += float(loss_dict["bpp_loss"].item())
-        totals["val_mse_loss"] += float(loss_dict["mse_loss"].item())
-        totals["val_ssim_loss"] += float(loss_dict["ssim_loss"].item())
-        totals["val_lpips_loss"] += float(loss_dict["lpips_loss"].item())
+        for key in LOSS_LOG_KEYS:
+            totals[f"val_{key}"] += float(loss_dict[key].item())
 
         steps += 1
 
@@ -202,7 +285,7 @@ def train_loop(
     dataloader,
     epochs: int = 5,
     device: str = "cuda",
-    lambda_rate: float = 0.01,
+    lambda_rd: Optional[float] = None,
     checkpoint_path: Optional[str] = None,
     train_log_path: Optional[str] = None,
     val_loader=None,
@@ -211,6 +294,14 @@ def train_loop(
     grad_clip_norm: float = 1.0,
     reconstruction_path: Optional[str] = None,
     save_reconstruction_each_epoch: bool = True,
+    dsad_beta_max: float = 0.0,
+    dsad_warmup_fraction: float = 0.20,
+    dsad_ramp_fraction: float = 0.10,
+    dsad_loss_type: str = "smooth_l1",
+    lambda_ssim: float = 0.0,
+    lambda_lpips: float = 0.0,
+    *,
+    lambda_rate: Optional[float] = None,
 ):
     """
     Trains ATIC model.
@@ -242,8 +333,9 @@ def train_loop(
             Number of epochs.
         device:
             cuda or cpu.
-        lambda_rate:
-            Weight for BPP term in ATICLoss.
+        lambda_rd:
+            Weight on ``255^2 * MSE`` in the standard learned-compression
+            objective. Defaults to 0.01.
         checkpoint_path:
             Where to save final model.state_dict().
         train_log_path:
@@ -260,6 +352,15 @@ def train_loop(
             Path to latest/final reconstruction image.
         save_reconstruction_each_epoch:
             Whether to save reconstruction preview after every epoch.
+        dsad_beta_max:
+            Maximum decoder-synchronised attention distillation weight.
+        dsad_warmup_fraction:
+            Initial fraction of epochs with DSAD disabled.
+        dsad_ramp_fraction:
+            Following fraction of epochs used to linearly ramp DSAD.
+        lambda_rate:
+            Deprecated compatibility spelling for ``lambda_rd``. It does not
+            weight BPP.
 
     Returns:
         {
@@ -271,6 +372,32 @@ def train_loop(
         print(f"[{variant_name}] Dataloader not found. Skipping training.")
         return {"history": [], "checkpoint_path": None}
 
+    if epochs <= 0:
+        raise ValueError("epochs must be positive")
+    if lambda_rd is not None and lambda_rate is not None:
+        raise ValueError("Pass lambda_rd, not both lambda_rd and lambda_rate")
+    if lambda_rd is None:
+        if lambda_rate is not None:
+            warnings.warn(
+                "train_loop(lambda_rate=...) is deprecated; the value is now "
+                "interpreted as lambda_rd and weights 255^2*MSE, not BPP.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            lambda_rd = lambda_rate
+        else:
+            lambda_rd = 0.01
+
+    # Validate the complete schedule before allocating model/optimizer state.
+    for schedule_epoch in range(epochs):
+        dsad_beta_for_epoch(
+            schedule_epoch,
+            epochs,
+            dsad_beta_max,
+            dsad_warmup_fraction,
+            dsad_ramp_fraction,
+        )
+
     model.to(device)
     model.train()
 
@@ -281,16 +408,17 @@ def train_loop(
     )
 
     criterion = ATICLoss(
-        lambda_rate=lambda_rate,
-        lambda_mse=1.0,
-        lambda_ssim=0.5,
-        lambda_lpips=0.1,
+        lambda_rd=lambda_rd,
+        lambda_ssim=lambda_ssim,
+        lambda_lpips=lambda_lpips,
+        dsad_beta=0.0,
+        dsad_loss_type=dsad_loss_type,
         device=device,
     )
 
     print(
         f"[{variant_name}] Training started on {device} | "
-        f"lambda_rate={lambda_rate} | "
+        f"lambda_rd={lambda_rd} | dsad_beta_max={dsad_beta_max} | "
         f"lr={learning_rate} | aux_lr={aux_learning_rate}"
     )
 
@@ -301,15 +429,16 @@ def train_loop(
 
     for epoch in range(epochs):
         model.train()
+        epoch_beta = dsad_beta_for_epoch(
+            epoch,
+            epochs,
+            dsad_beta_max,
+            dsad_warmup_fraction,
+            dsad_ramp_fraction,
+        )
 
-        epoch_totals = {
-            "loss": 0.0,
-            "bpp_loss": 0.0,
-            "mse_loss": 0.0,
-            "ssim_loss": 0.0,
-            "lpips_loss": 0.0,
-            "aux_loss": 0.0,
-        }
+        epoch_totals = {key: 0.0 for key in LOSS_LOG_KEYS}
+        epoch_totals["aux_loss"] = 0.0
         epoch_steps = 0
 
         pbar = tqdm(
@@ -326,7 +455,7 @@ def train_loop(
             optimizer.zero_grad(set_to_none=True)
 
             outputs = model(batch)
-            loss_dict = criterion(outputs, batch)
+            loss_dict = criterion(outputs, batch, beta=epoch_beta)
             loss = loss_dict["loss"]
 
             loss.backward()
@@ -356,21 +485,20 @@ def train_loop(
             # -------------------------
             # Logging
             # -------------------------
-            epoch_totals["loss"] += float(loss_dict["loss"].item())
-            epoch_totals["bpp_loss"] += float(loss_dict["bpp_loss"].item())
-            epoch_totals["mse_loss"] += float(loss_dict["mse_loss"].item())
-            epoch_totals["ssim_loss"] += float(loss_dict["ssim_loss"].item())
-            epoch_totals["lpips_loss"] += float(loss_dict["lpips_loss"].item())
+            for key in LOSS_LOG_KEYS:
+                epoch_totals[key] += float(loss_dict[key].item())
             epoch_totals["aux_loss"] += aux_loss_value
             epoch_steps += 1
 
             pbar.set_postfix(
                 {
                     "Loss": f"{loss_dict['loss'].item():.4f}",
-                    "BPP": f"{loss_dict['bpp_loss'].item():.4f}",
+                    "BPP": f"{loss_dict['total_bpp'].item():.4f}",
+                    "y": f"{loss_dict['y_bpp'].item():.3f}",
+                    "z": f"{loss_dict['z_bpp'].item():.3f}",
                     "MSE": f"{loss_dict['mse_loss'].item():.6f}",
-                    "SSIM_L": f"{loss_dict['ssim_loss'].item():.4f}",
-                    "LPIPS": f"{loss_dict['lpips_loss'].item():.4f}",
+                    "DSAD": f"{loss_dict['dsad_loss'].item():.4f}",
+                    "beta": f"{epoch_beta:.4g}",
                     "Aux": f"{aux_loss_value:.4f}",
                 }
             )
@@ -382,15 +510,17 @@ def train_loop(
             epoch_avg = {
                 "epoch": epoch + 1,
                 "steps": epoch_steps,
-                "loss": epoch_totals["loss"] / epoch_steps,
-                "bpp_loss": epoch_totals["bpp_loss"] / epoch_steps,
-                "mse_loss": epoch_totals["mse_loss"] / epoch_steps,
-                "ssim_loss": epoch_totals["ssim_loss"] / epoch_steps,
-                "lpips_loss": epoch_totals["lpips_loss"] / epoch_steps,
                 "aux_loss": epoch_totals["aux_loss"] / epoch_steps,
-                "lambda_rate": lambda_rate,
+                "lambda_rd": lambda_rd,
+                "dsad_beta_max": dsad_beta_max,
                 "variant": variant_name,
             }
+            epoch_avg.update(
+                {
+                    key: epoch_totals[key] / epoch_steps
+                    for key in LOSS_LOG_KEYS
+                }
+            )
 
             # Optional validation
             val_avg = validate_loop(
@@ -398,6 +528,7 @@ def train_loop(
                 dataloader=val_loader,
                 criterion=criterion,
                 device=device,
+                beta=epoch_beta,
             )
             if val_avg is not None:
                 epoch_avg.update(val_avg)
@@ -411,17 +542,20 @@ def train_loop(
             if val_avg is not None:
                 val_msg = (
                     f" | Val Loss: {epoch_avg['val_loss']:.4f}"
-                    f" | Val BPP: {epoch_avg['val_bpp_loss']:.4f}"
+                    f" | Val BPP: {epoch_avg['val_total_bpp']:.4f}"
                     f" | Val MSE: {epoch_avg['val_mse_loss']:.6f}"
+                    f" | Val DSAD: {epoch_avg['val_dsad_loss']:.4f}"
                 )
 
             print(
                 f"[{variant_name}] Epoch {epoch + 1}/{epochs}"
                 f" | Loss: {epoch_avg['loss']:.4f}"
-                f" | BPP: {epoch_avg['bpp_loss']:.4f}"
+                f" | BPP: {epoch_avg['total_bpp']:.4f}"
+                f" (y={epoch_avg['y_bpp']:.4f}, z={epoch_avg['z_bpp']:.4f})"
                 f" | MSE: {epoch_avg['mse_loss']:.6f}"
-                f" | SSIM_L: {epoch_avg['ssim_loss']:.4f}"
-                f" | LPIPS: {epoch_avg['lpips_loss']:.4f}"
+                f" | DSAD: {epoch_avg['dsad_loss']:.4f}"
+                f" (weighted={epoch_avg['weighted_dsad_loss']:.4f},"
+                f" beta={epoch_avg['beta']:.4g})"
                 f" | Aux: {epoch_avg['aux_loss']:.4f}"
                 f"{val_msg}"
             )

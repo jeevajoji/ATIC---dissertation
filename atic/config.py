@@ -32,6 +32,9 @@ class ArchitectureConfig:
 
     # Block 3: Quantizer
     use_adaptive_quant: bool = True   # False = uniform quantisation
+    # Decoder-synchronised gain bound. The entropy model also stores this in
+    # the checkpoint because it changes operational decoding.
+    gain_max: float = 2.0
 
     # Block 4+5: Entropy model
     use_hyperprior: bool = True

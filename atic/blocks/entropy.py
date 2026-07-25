@@ -18,6 +18,7 @@ Returned likelihoods are used to compute BPP:
     BPP = sum(-log2(likelihoods)) / num_pixels
 """
 
+import math
 from typing import Dict, Optional, Sequence, Tuple
 
 import torch
@@ -34,14 +35,23 @@ class CompressAIHyperpriorEntropy(nn.Module):
         latent_dim: int = 1024,
         hyper_dim: int = 192,
         use_adaptive_quant: bool = True,
-        gain_min: float = 0.1,
+        gain_max: float = 2.0,
     ):
         super().__init__()
+
+        if not math.isfinite(gain_max) or gain_max <= 1.0:
+            raise ValueError("gain_max must be a finite value greater than 1")
 
         self.latent_dim = latent_dim
         self.hyper_dim = hyper_dim
         self.use_adaptive_quant = use_adaptive_quant
-        self.gain_min = gain_min
+        # Persist the bound in checkpoints because it changes decoding. A
+        # plain Python attribute could silently diverge between sender and
+        # receiver even when both use the same checkpoint file.
+        self.register_buffer(
+            "_log_gain_max",
+            torch.tensor(math.log(float(gain_max)), dtype=torch.float32),
+        )
 
         # Hyper-analysis: y -> z
         self.h_a = nn.Sequential(
@@ -86,14 +96,11 @@ class CompressAIHyperpriorEntropy(nn.Module):
             entropy_coder="ans",
         )
 
-        # Training-only teacher projection retained for the later DSAD phase.
-        # It is never used to construct an operational entropy bitstream.
-        self.attn_refine = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 1, kernel_size=1, bias=False),
-            nn.Sigmoid(),
-        )
+    @property
+    def gain_max(self) -> float:
+        """Return the checkpoint-bound maximum adaptive gain."""
+
+        return math.exp(float(self._log_gain_max.detach().cpu()))
 
     @staticmethod
     def _crop_to_spatial(
@@ -128,26 +135,55 @@ class CompressAIHyperpriorEntropy(nn.Module):
         ]
         return scales_hat.abs().clamp(min=1e-6), means_hat, gain_logits
 
+    def _score_to_gain_map(
+        self,
+        score: torch.Tensor,
+    ) -> torch.Tensor:
+        """Map a bounded score to a scale-normalised positive gain.
+
+        Spatial centring makes the log-gain mean zero independently for every
+        image and channel. Consequently the spatial geometric mean of the gain
+        is one. A score in ``[-1, 1]`` has a centred range of ``[-2, 2]``, so
+        the half-log scaling bounds the gain by
+        ``[1 / gain_max, gain_max]``. This removes global scale as a shortcut;
+        it does not by itself guarantee equal actual bitrate.
+        """
+        centred_score = score - score.mean(dim=(-2, -1), keepdim=True)
+        log_gain_bound = self._log_gain_max.to(
+            device=score.device,
+            dtype=score.dtype,
+        )
+        log_gain = 0.5 * log_gain_bound * centred_score
+        return torch.exp(log_gain)
+
     def _make_gain_map(
         self,
         gain_logits: torch.Tensor,
     ) -> torch.Tensor:
-        """Create the operational, decoder-reproducible gain map.
+        """Create the operational decoder-synchronised student gain.
 
-        The only input is produced by hyper-synthesis from decoded ``z_hat``.
-        Therefore the encoder and decoder can calculate exactly the same map
-        without transmitting a separate attention tensor.
+        ``gain_logits`` comes only from hyper-synthesis of decoded ``z_hat``.
+        The source image and encoder attention are therefore unnecessary at
+        the decoder and no separate attention tensor enters the bitstream.
         """
         if not self.use_adaptive_quant:
             return torch.ones_like(gain_logits)
-        return torch.sigmoid(gain_logits) + self.gain_min
+        return self._score_to_gain_map(torch.tanh(gain_logits))
 
     def _make_teacher_map(
         self,
         attn_map: Optional[torch.Tensor],
         spatial_shape: Sequence[int],
     ) -> Optional[torch.Tensor]:
-        """Project encoder attention for observation/distillation only."""
+        """Create the deterministic, parameter-free DSAD target transform.
+
+        The deepest encoder SAG map supervises the decoder-synchronised
+        student during training only. Detaching after interpolation prevents
+        the distillation loss from changing SAG or the encoder through this
+        target. SAG can still evolve through the ordinary RD objective, making
+        this an online stop-gradient teacher. The target transform is never
+        called by ``compress`` or ``decompress``.
+        """
 
         if attn_map is None:
             return None
@@ -159,7 +195,9 @@ class CompressAIHyperpriorEntropy(nn.Module):
                 mode="bilinear",
                 align_corners=False,
             )
-        return self.attn_refine(attn_map) + self.gain_min
+        teacher_attention = attn_map.detach().clamp(0.0, 1.0)
+        teacher_score = (2.0 * teacher_attention) - 1.0
+        return self._score_to_gain_map(teacher_score)
 
     def forward(
         self,

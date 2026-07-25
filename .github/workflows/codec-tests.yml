@@ -37,7 +37,8 @@ jobs:
             compressai==1.2.8 \
             timm==0.6.13 \
             numpy==1.26.4 \
-            pillow==12.2.0
+            pillow==12.2.0 \
+            tqdm==4.67.3
 
       - name: Verify codec dependency imports
         run: |

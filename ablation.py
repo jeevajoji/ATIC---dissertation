@@ -1,6 +1,6 @@
 ﻿"""
 ablation.py — ATIC Ablation Study Runner
-Each variant is trained at multiple lambda_rate values to produce
+Each variant is trained at multiple rate-distortion lambda values to produce
 a real rate-distortion curve (one point per lambda, not mocked).
 
 Kaggle-friendly usage (no code edits required):
@@ -13,30 +13,48 @@ Environment variable equivalents are also supported, e.g.:
 """
 import argparse
 import csv
+import math
 import os
 from dataclasses import asdict
 from typing import Dict, List, Optional, Tuple
 
 import torch
-import matplotlib.pyplot as plt
 
 from atic.config  import ArchitectureConfig
-from atic.model   import ATICModel
-from atic.train   import train_loop
-from atic.eval    import eval_single
-from atic.dataset import build_and_save_split_manifests, get_video_dataloaders
-from atic.metrics import plot_rate_distortion_curves
-from atic.repro import (
-    get_environment_snapshot,
-    set_global_determinism,
-    utc_timestamp,
-    write_json,
+
+
+# ---------------------------------------------------------------------------
+# Ablation variant definitions
+# ---------------------------------------------------------------------------
+def _full_atic_config() -> ArchitectureConfig:
+    """Return the shared architecture for the causal DSAD comparison."""
+
+    return ArchitectureConfig(
+        use_overlapping_patches=True,
+        use_sag=True,
+        use_cbam=True,
+        use_adaptive_quant=True,
+        use_hyperprior=True,
+    )
+
+
+# These names are retained so archived experiments and old commands remain
+# readable. They are architecture ablations, not the controlled DSAD claim.
+HISTORICAL_VARIANTS = (
+    "Baseline",
+    "No_Overlap",
+    "No_CBAM",
+    "No_AdaptiveQuant",
+    "Full_ATIC",
 )
 
+# This is the causal comparison for the paper: architecture, data, seed,
+# lambda, and schedule are identical. Only the maximum DSAD beta differs.
+CAUSAL_DSAD_VARIANTS = (
+    "Full_ATIC_NoDSAD",
+    "Full_ATIC_DSAD",
+)
 
-# ---------------------------------------------------------------------------
-# Ablation variant definitions  (A1 = true baseline, A6 = full ATIC)
-# ---------------------------------------------------------------------------
 ABLATION_VARIANTS = {
     "Baseline": ArchitectureConfig(
         use_overlapping_patches=False,
@@ -66,19 +84,157 @@ ABLATION_VARIANTS = {
         use_adaptive_quant=False,
         use_hyperprior=True,
     ),
-    "Full_ATIC": ArchitectureConfig(
-        use_overlapping_patches=True,
-        use_sag=True,
-        use_cbam=True,
-        use_adaptive_quant=True,
-        use_hyperprior=True,
-    ),
+    "Full_ATIC": _full_atic_config(),
+    "Full_ATIC_NoDSAD": _full_atic_config(),
+    "Full_ATIC_DSAD": _full_atic_config(),
 }
 
 # Each lambda produces one point on the RD curve.
-# Lower lambda  → model uses more bits → higher quality (high BPP, high PSNR)
-# Higher lambda → model uses fewer bits → lower quality (low BPP, low PSNR)
+# Higher lambda gives distortion more weight, normally producing higher
+# quality at a higher bitrate under the standard BPP + lambda*distortion loss.
 LAMBDA_RATES = [0.001, 0.01, 0.1]
+
+
+def _variant_family(variant_name: str) -> str:
+    if variant_name in CAUSAL_DSAD_VARIANTS:
+        return "causal_dsad_ablation"
+    return "historical_architecture_ablation"
+
+
+def _validate_dsad_hyperparameters(
+    beta_max: float,
+    warmup_fraction: float,
+    ramp_fraction: float,
+) -> None:
+    values = {
+        "dsad_beta_max": beta_max,
+        "dsad_warmup_fraction": warmup_fraction,
+        "dsad_ramp_fraction": ramp_fraction,
+    }
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite, got {value}")
+    if beta_max < 0:
+        raise ValueError("dsad_beta_max must be non-negative")
+    if not 0.0 <= warmup_fraction <= 1.0:
+        raise ValueError("dsad_warmup_fraction must be between 0 and 1")
+    if not 0.0 <= ramp_fraction <= 1.0:
+        raise ValueError("dsad_ramp_fraction must be between 0 and 1")
+    if warmup_fraction + ramp_fraction > 1.0:
+        raise ValueError(
+            "dsad_warmup_fraction + dsad_ramp_fraction must not exceed 1"
+        )
+
+
+def _validate_study_hyperparameters(
+    *,
+    epochs: int,
+    batch_size: int,
+    height: int,
+    width: int,
+    val_every: int,
+    num_workers: int,
+    seeds: List[int],
+    lambda_rates: List[float],
+    run_variants: Optional[List[str]],
+) -> None:
+    positive_integers = {
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "height": height,
+        "width": width,
+    }
+    for name, value in positive_integers.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if not isinstance(val_every, int) or isinstance(val_every, bool):
+        raise ValueError("val_every must be an integer")
+    if val_every < 2:
+        raise ValueError(
+            "val_every must be at least 2 so the training split is non-empty"
+        )
+    if (
+        not isinstance(num_workers, int)
+        or isinstance(num_workers, bool)
+        or num_workers < 0
+    ):
+        raise ValueError("num_workers must be a non-negative integer")
+
+    if not seeds:
+        raise ValueError("At least one seed is required")
+    if any(not isinstance(seed, int) or isinstance(seed, bool) for seed in seeds):
+        raise ValueError("Every seed must be an integer")
+    if len(seeds) != len(set(seeds)):
+        raise ValueError("Seeds must be unique to avoid overwriting run folders")
+
+    if not lambda_rates:
+        raise ValueError("At least one lambda_rd value is required")
+    for value in lambda_rates:
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(
+                "Every lambda_rd value must be finite and non-negative"
+            )
+    if len(lambda_rates) != len(set(lambda_rates)):
+        raise ValueError(
+            "lambda_rd values must be unique to avoid overwriting run folders"
+        )
+
+    if run_variants is not None:
+        if not run_variants:
+            raise ValueError(
+                "run_variants must contain at least one variant or be None"
+            )
+        if len(run_variants) != len(set(run_variants)):
+            raise ValueError(
+                "Variant names must be unique to avoid ambiguous repeated requests"
+            )
+
+
+def _manifest_entry_count(manifest_path: str) -> int:
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
+def _format_optional_metric(
+    point: Dict[str, object],
+    name: str,
+    precision: int,
+) -> str:
+    """Format a metric without turning an unavailable dependency into zero."""
+
+    value = point.get(name)
+    return "unavailable" if value is None else f"{float(value):.{precision}f}"
+
+
+def _dsad_settings_for_variant(
+    variant_name: str,
+    beta_max: float,
+    warmup_fraction: float,
+    ramp_fraction: float,
+) -> Dict[str, object]:
+    """Return the controlled training settings for one named variant."""
+
+    _validate_dsad_hyperparameters(
+        beta_max,
+        warmup_fraction,
+        ramp_fraction,
+    )
+    is_dsad_arm = variant_name == "Full_ATIC_DSAD"
+    effective_beta = beta_max if is_dsad_arm else 0.0
+    return {
+        "comparison_role": (
+            "distilled_student"
+            if is_dsad_arm
+            else (
+                "identical_backbone_control"
+                if variant_name == "Full_ATIC_NoDSAD"
+                else "not_a_causal_dsad_arm"
+            )
+        ),
+        "beta_max": effective_beta,
+        "warmup_fraction": warmup_fraction,
+        "ramp_fraction": ramp_fraction,
+    }
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -144,8 +300,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--variants",
-        default=_env_or_default("ATIC_VARIANTS", ""),
-        help="Comma-separated variant names (empty = all).",
+        default=_env_or_default(
+            "ATIC_VARIANTS",
+            ",".join(CAUSAL_DSAD_VARIANTS),
+        ),
+        help=(
+            "Comma-separated variant names. Defaults to the controlled "
+            "Full_ATIC_NoDSAD,Full_ATIC_DSAD pair; pass an empty value to "
+            "include every registered variant, including historical "
+            "architecture ablations."
+        ),
     )
     parser.add_argument(
         "--seeds",
@@ -197,6 +361,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=int(_env_or_default("ATIC_WIDTH", "512")),
         help="Training/evaluation image width.",
     )
+    parser.add_argument(
+        "--dsad-beta-max",
+        type=float,
+        default=float(_env_or_default("ATIC_DSAD_BETA_MAX", "0.05")),
+        help=(
+            "Maximum distillation weight for Full_ATIC_DSAD. The matched "
+            "Full_ATIC_NoDSAD control always uses zero."
+        ),
+    )
+    parser.add_argument(
+        "--dsad-warmup-fraction",
+        type=float,
+        default=float(
+            _env_or_default("ATIC_DSAD_WARMUP_FRACTION", "0.20")
+        ),
+        help="Fraction of epochs with beta held at zero (default: 0.20).",
+    )
+    parser.add_argument(
+        "--dsad-ramp-fraction",
+        type=float,
+        default=float(
+            _env_or_default("ATIC_DSAD_RAMP_FRACTION", "0.10")
+        ),
+        help="Fraction of epochs used to ramp beta to its maximum (default: 0.10).",
+    )
     return parser
 
 
@@ -214,6 +403,8 @@ def visualise_reconstruction(
     show=False,
 ):
     try:
+        import matplotlib.pyplot as plt
+
         model.eval()
         with torch.no_grad():
             batch = next(iter(val_loader)).to(device)
@@ -290,12 +481,47 @@ def run_ablation_study(
     pin_memory: bool = True,
     height: int = 512,
     width: int = 512,
-
+    dsad_beta_max: float = 0.05,
+    dsad_warmup_fraction: float = 0.20,
+    dsad_ramp_fraction: float = 0.10,
 ):
+    # Keep plotting/training-only dependencies lazy so configuration inspection
+    # and ``--help`` work in lightweight codec environments.
+    from atic.dataset import (
+        build_and_save_split_manifests,
+        get_video_dataloaders,
+    )
+    from atic.eval import eval_single
+    from atic.metrics import plot_rate_distortion_curves
+    from atic.model import ATICModel
+    from atic.repro import (
+        get_environment_snapshot,
+        set_global_determinism,
+        utc_timestamp,
+        write_json,
+    )
+    from atic.train import train_loop
+
     if seeds is None:
         seeds = [42]
     if lambda_rates is None:
         lambda_rates = LAMBDA_RATES
+    _validate_dsad_hyperparameters(
+        dsad_beta_max,
+        dsad_warmup_fraction,
+        dsad_ramp_fraction,
+    )
+    _validate_study_hyperparameters(
+        epochs=epochs,
+        batch_size=batch_size,
+        height=height,
+        width=width,
+        val_every=val_every,
+        num_workers=num_workers,
+        seeds=seeds,
+        lambda_rates=lambda_rates,
+        run_variants=run_variants,
+    )
 
     device = device if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
@@ -324,8 +550,15 @@ def run_ablation_study(
         val_every=val_every,
     )
     if train_manifest is None or val_manifest is None:
-        print("No frames found. Check video_path.")
-        return
+        raise FileNotFoundError(f"No PNG frames found in {video_path}")
+    train_image_count = _manifest_entry_count(train_manifest)
+    val_image_count = _manifest_entry_count(val_manifest)
+    if train_image_count == 0 or val_image_count == 0:
+        raise ValueError(
+            "The pilot requires non-empty train and validation splits; "
+            f"found train={train_image_count}, validation={val_image_count}. "
+            "Provide more frames or choose a smaller --val-every value."
+        )
 
     write_json(
         os.path.join(study_dir, "study_config.json"),
@@ -340,8 +573,26 @@ def run_ablation_study(
             "num_workers": num_workers,
             "pin_memory": pin_memory,
             "lambdas": lambda_rates,
+            "split_counts": {
+                "train": train_image_count,
+                "val": val_image_count,
+            },
+            "dsad_schedule": {
+                "requested_beta_max": dsad_beta_max,
+                "warmup_fraction": dsad_warmup_fraction,
+                "ramp_fraction": dsad_ramp_fraction,
+            },
             "variants": {
-                variant_name: asdict(config)
+                variant_name: {
+                    "experiment_family": _variant_family(variant_name),
+                    "architecture": asdict(config),
+                    "dsad": _dsad_settings_for_variant(
+                        variant_name,
+                        dsad_beta_max,
+                        dsad_warmup_fraction,
+                        dsad_ramp_fraction,
+                    ),
+                }
                 for variant_name, config in variants_to_run.items()
             },
             "manifests": {
@@ -370,12 +621,26 @@ def run_ablation_study(
             seed=seed,
         )
         if train_loader is None or val_loader is None:
-            print("Could not build dataloaders from manifests.")
-            return
+            raise RuntimeError("Could not build dataloaders from manifests")
+        if len(train_loader.dataset) != train_image_count:
+            raise RuntimeError("Training DataLoader does not match its manifest")
+        if len(val_loader.dataset) != val_image_count:
+            raise RuntimeError("Validation DataLoader does not match its manifest")
 
         for variant_name, config in variants_to_run.items():
+            dsad_settings = _dsad_settings_for_variant(
+                variant_name,
+                dsad_beta_max,
+                dsad_warmup_fraction,
+                dsad_ramp_fraction,
+            )
             print(f"\n{'='*55}")
             print(f"Seed: {seed} | Variant: {variant_name}")
+            print(
+                "Experiment family: "
+                f"{_variant_family(variant_name)} | "
+                f"DSAD beta max: {dsad_settings['beta_max']}"
+            )
             print(f"{'='*55}")
 
             for lam in lambda_rates:
@@ -392,13 +657,16 @@ def run_ablation_study(
                     os.path.join(run_dir, "run_config.json"),
                     {
                         "variant": variant_name,
-                        "lambda_rate": lam,
+                        "experiment_family": _variant_family(variant_name),
+                        "lambda_rd": lam,
                         "seed": seed,
+                        "paired_initialization_seed": seed,
                         "epochs": epochs,
                         "batch_size": batch_size,
                         "height": height,
                         "width": width,
                         "architecture": asdict(config),
+                        "dsad": dsad_settings,
                         "device": device,
                         "manifest_paths": {
                             "train": train_manifest,
@@ -413,19 +681,39 @@ def run_ablation_study(
                 )
 
                 # Fresh model for every (variant, lambda, seed) combination.
+                # Reset immediately before construction so the causal DSAD
+                # arms start from exactly the same parameter initialisation
+                # and DataLoader worker-seed stream.
+                set_global_determinism(seed=seed, deterministic=True)
+                for loader in (train_loader, val_loader):
+                    generator = getattr(loader, "generator", None)
+                    if generator is not None:
+                        generator.manual_seed(seed)
                 model = ATICModel(config, H=height, W=width).to(device)
 
                 train_artifacts = train_loop(
                     model,
                     variant_name=f"{variant_name}_lam{lam}_seed{seed}",
-                    dataloader=train_loader,\
+                    dataloader=train_loader,
                     val_loader=val_loader,
                     epochs=epochs,
                     device=device,
-                    lambda_rate=lam,
+                    lambda_rd=lam,
+                    dsad_beta_max=dsad_settings["beta_max"],
+                    dsad_warmup_fraction=dsad_settings["warmup_fraction"],
+                    dsad_ramp_fraction=dsad_settings["ramp_fraction"],
                     checkpoint_path=os.path.join(run_dir, "model.pth"),
                     train_log_path=os.path.join(run_dir, "train_log.jsonl"),
                 )
+                history = train_artifacts.get("history")
+                if not isinstance(history, list) or len(history) != epochs:
+                    observed_epochs = (
+                        len(history) if isinstance(history, list) else None
+                    )
+                    raise RuntimeError(
+                        "Training did not complete every requested epoch: "
+                        f"expected {epochs}, observed {observed_epochs}"
+                    )
 
                 point = eval_single(
                     model,
@@ -440,9 +728,9 @@ def run_ablation_study(
 
                 print(
                     f"  BPP={bpp_key:.4f} | "
-                    f"PSNR={point.get('PSNR', 0):.2f} | "
-                    f"SSIM={point.get('SSIM', 0):.4f} | "
-                    f"LPIPS={point.get('LPIPS', 0):.4f}"
+                    f"PSNR={_format_optional_metric(point, 'PSNR', 2)} | "
+                    f"SSIM={_format_optional_metric(point, 'SSIM', 4)} | "
+                    f"LPIPS={_format_optional_metric(point, 'LPIPS', 4)}"
                 )
 
                 visualise_reconstruction(
@@ -459,7 +747,8 @@ def run_ablation_study(
                 summary_row = {
                     "variant": variant_name,
                     "seed": seed,
-                    "lambda_rate": lam,
+                    "lambda_rd": lam,
+                    "dsad_beta_max": dsad_settings["beta_max"],
                     "checkpoint_path": train_artifacts.get("checkpoint_path"),
                 }
                 summary_row.update(point)
@@ -510,5 +799,8 @@ if __name__ == "__main__":
         num_workers=args.num_workers,
         pin_memory=pin_memory,
         height=args.height,
-        width=args.width
+        width=args.width,
+        dsad_beta_max=args.dsad_beta_max,
+        dsad_warmup_fraction=args.dsad_warmup_fraction,
+        dsad_ramp_fraction=args.dsad_ramp_fraction,
     )

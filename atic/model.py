@@ -13,6 +13,7 @@ Updated version:
 import hashlib
 import hmac
 import json
+import math
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -142,6 +143,7 @@ class ATICModel(CompressionModel):
             latent_dim=self.latent_dim,
             hyper_dim=192,
             use_adaptive_quant=config.use_adaptive_quant,
+            gain_max=config.gain_max,
         )
 
         self.decoder = SwinDecoder(
@@ -277,6 +279,16 @@ class ATICModel(CompressionModel):
             raise TypeError("ATIC checkpoint must contain a model state_dict")
 
         result = self.load_state_dict(state_dict, strict=strict)
+        if not math.isclose(
+            self.entropy.gain_max,
+            float(self.config.gain_max),
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            raise ValueError(
+                "Checkpoint gain_max does not match run_config.json: "
+                f"{self.entropy.gain_max} versus {self.config.gain_max}"
+            )
         self.set_model_id(sha256_file(checkpoint_path))
         return result
 

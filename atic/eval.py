@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Optional
 
@@ -29,19 +30,35 @@ def _bpp_from_likelihoods(likelihoods, batch, eps: float = 1e-9) -> float:
 def _bits_from_likelihoods(likelihoods, eps: float = 1e-9) -> float:
     """Return the total estimated coding bits represented by likelihoods."""
 
+    if not math.isfinite(eps) or not 0.0 < eps <= 1.0:
+        raise ValueError("eps must be finite and in the interval (0, 1]")
+
     if likelihoods is None:
         return 0.0
+
+    def tensor_bits(likelihood) -> float:
+        if not isinstance(likelihood, torch.Tensor):
+            raise TypeError(
+                "Likelihood entries must be tensors or None; "
+                f"received {type(likelihood)}"
+            )
+        if not likelihood.is_floating_point():
+            raise TypeError("Likelihood tensors must use a floating-point dtype")
+        if not bool(torch.isfinite(likelihood).all()):
+            raise ValueError("Likelihood tensor contains NaN or infinity")
+        if bool((likelihood < 0).any()):
+            raise ValueError("Likelihood tensor contains a negative probability")
+        probability = likelihood.clamp(min=eps, max=1.0)
+        return float(-torch.log2(probability).sum().item())
 
     if isinstance(likelihoods, dict):
         bits = 0.0
         for likelihood in likelihoods.values():
             if likelihood is not None:
-                bits += -torch.log2(likelihood.clamp(min=eps)).sum().item()
+                bits += tensor_bits(likelihood)
         return float(bits)
     elif isinstance(likelihoods, torch.Tensor):
-        return float(
-            -torch.log2(likelihoods.clamp(min=eps)).sum().item()
-        )
+        return tensor_bits(likelihoods)
     raise TypeError(
         f"Unsupported likelihoods type: {type(likelihoods)}. "
         "Expected dict, Tensor, or None."
@@ -78,6 +95,46 @@ def _image_bpp_from_likelihoods(
     return float(_bits_from_likelihoods(selected, eps=eps) / (height * width))
 
 
+def _encoded_byte_breakdown(encoded):
+    """Validate and return the byte components reported by ``compress()``."""
+
+    num_bytes = int(encoded["num_bytes"])
+    payload_bytes = int(encoded["payload_bytes"])
+    y_bytes = int(encoded["y_bytes"])
+    z_bytes = int(encoded["z_bytes"])
+    header_bytes = int(encoded.get("header_bytes", num_bytes - payload_bytes))
+
+    components = {
+        "num_bytes": num_bytes,
+        "payload_bytes": payload_bytes,
+        "y_bytes": y_bytes,
+        "z_bytes": z_bytes,
+        "header_bytes": header_bytes,
+    }
+    if any(value < 0 for value in components.values()):
+        raise ValueError(f"Codec returned a negative byte count: {components}")
+    if y_bytes + z_bytes != payload_bytes:
+        raise ValueError(
+            "Codec byte accounting is inconsistent: "
+            f"y_bytes + z_bytes = {y_bytes + z_bytes}, "
+            f"payload_bytes = {payload_bytes}"
+        )
+    if header_bytes + payload_bytes != num_bytes:
+        raise ValueError(
+            "Codec byte accounting is inconsistent: "
+            f"header_bytes + payload_bytes = {header_bytes + payload_bytes}, "
+            f"num_bytes = {num_bytes}"
+        )
+    return components
+
+
+def _format_optional_metric(point, name: str, precision: int) -> str:
+    """Render unavailable optional metrics explicitly instead of as zero."""
+
+    value = point.get(name)
+    return "unavailable" if value is None else f"{float(value):.{precision}f}"
+
+
 def eval_single(
     model,
     dataloader,
@@ -90,7 +147,10 @@ def eval_single(
     When ``bitstream_dir`` is supplied (as it is by ``ablation.py``), the
     headline ``BPP`` is measured from complete ``.atic`` files and quality
     metrics use images returned by ``decompress()``.  Model-likelihood rate is
-    retained as ``BPP_estimated``.
+    retained as ``BPP_estimated``. Actual mode also separates y, z, and header
+    rates; ``BPP_payload_minus_estimated`` is the entropy-coder calibration
+    gap, while ``BPP_actual_minus_estimated`` additionally includes the fixed
+    container header.
 
     With no bitstream directory, callers can still request real coding through
     ``use_actual_bitstream=True``; streams are then held only in memory.
@@ -131,6 +191,9 @@ def eval_single(
     total_estimated_bits = 0.0
     total_actual_bytes = 0
     total_payload_bytes = 0
+    total_y_bytes = 0
+    total_z_bytes = 0
+    total_header_bytes = 0
     total_images = 0
 
     with torch.no_grad():
@@ -163,9 +226,13 @@ def eval_single(
                     reconstructions.append(
                         model.decompress(encoded["bitstream"])
                     )
-                    encoded_bytes = int(encoded["num_bytes"])
+                    byte_counts = _encoded_byte_breakdown(encoded)
+                    encoded_bytes = byte_counts["num_bytes"]
                     total_actual_bytes += encoded_bytes
-                    total_payload_bytes += int(encoded["payload_bytes"])
+                    total_payload_bytes += byte_counts["payload_bytes"]
+                    total_y_bytes += byte_counts["y_bytes"]
+                    total_z_bytes += byte_counts["z_bytes"]
+                    total_header_bytes += byte_counts["header_bytes"]
                     image_metric_bpps.append(
                         float(
                             encoded_bytes
@@ -215,11 +282,29 @@ def eval_single(
     if use_actual_bitstream:
         actual_bpp = float((total_actual_bytes * 8.0) / total_pixels)
         payload_bpp = float((total_payload_bytes * 8.0) / total_pixels)
+        y_bpp = float((total_y_bytes * 8.0) / total_pixels)
+        z_bpp = float((total_z_bytes * 8.0) / total_pixels)
+        header_bpp = float((total_header_bytes * 8.0) / total_pixels)
         averaged["BPP"] = actual_bpp
         averaged["BPP_actual"] = actual_bpp
         averaged["BPP_payload"] = payload_bpp
+        averaged["y_bpp_actual"] = y_bpp
+        averaged["z_bpp_actual"] = z_bpp
+        averaged["header_bpp"] = header_bpp
+        averaged["z_fraction"] = (
+            float(total_z_bytes / total_actual_bytes)
+            if total_actual_bytes > 0
+            else 0.0
+        )
+        averaged["BPP_payload_minus_estimated"] = (
+            payload_bpp - estimated_bpp
+        )
+        averaged["BPP_actual_minus_estimated"] = actual_bpp - estimated_bpp
         averaged["bitstream_bytes"] = total_actual_bytes
         averaged["payload_bytes"] = total_payload_bytes
+        averaged["y_bytes"] = total_y_bytes
+        averaged["z_bytes"] = total_z_bytes
+        averaged["header_bytes"] = total_header_bytes
     else:
         averaged["BPP"] = estimated_bpp
 
@@ -255,12 +340,27 @@ def eval_loop(
     print(f"  BPP:     {point.get('BPP', 0):.4f}")
     if "BPP_estimated" in point:
         print(f"  BPP est: {point['BPP_estimated']:.4f}")
-    print(f"  PSNR:    {point.get('PSNR', 0):.4f}")
-    print(f"  SSIM:    {point.get('SSIM', 0):.4f}")
-    print(f"  MS-SSIM: {point.get('MS-SSIM', 0):.4f}")
-    print(f"  LPIPS:   {point.get('LPIPS', 0):.4f}")
-    print(f"  DISTS:   {point.get('DISTS', 0):.4f}")
-    print(f"  MSE:     {point.get('MSE', 0):.6f}")
+    if "y_bpp_actual" in point:
+        print(
+            "  BPP parts: "
+            f"y={point['y_bpp_actual']:.4f}, "
+            f"z={point['z_bpp_actual']:.4f}, "
+            f"header={point['header_bpp']:.4f}"
+        )
+        print(
+            "  z/stream: "
+            f"{100.0 * point['z_fraction']:.2f}% | "
+            "payload-estimated: "
+            f"{point['BPP_payload_minus_estimated']:+.4f} BPP | "
+            "file-estimated: "
+            f"{point['BPP_actual_minus_estimated']:+.4f} BPP"
+        )
+    print(f"  PSNR:    {_format_optional_metric(point, 'PSNR', 4)}")
+    print(f"  SSIM:    {_format_optional_metric(point, 'SSIM', 4)}")
+    print(f"  MS-SSIM: {_format_optional_metric(point, 'MS-SSIM', 4)}")
+    print(f"  LPIPS:   {_format_optional_metric(point, 'LPIPS', 4)}")
+    print(f"  DISTS:   {_format_optional_metric(point, 'DISTS', 4)}")
+    print(f"  MSE:     {_format_optional_metric(point, 'MSE', 6)}")
 
     bpp_key = round(point.get("BPP", 0.0), 4)
     return {

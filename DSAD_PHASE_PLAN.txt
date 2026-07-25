@@ -12,6 +12,31 @@ the installed decoder weights, and metadata stored in the file. It must never
 need the original image or private encoder features.
 
 
+CURRENT EXECUTION GATE
+----------------------
+
+Implement and run a two-epoch, one-lambda, one-seed integration pilot for the
+identical Full_ATIC_NoDSAD and Full_ATIC_DSAD architectures. This pilot may
+verify gradients, schedules, logging, checkpointing, real bitstreams, and
+metric accounting only.
+
+Do not begin long training or report rate-distortion conclusions until the
+training, validation, and independent test manifests are leakage-free,
+inspected, and frozen. Validation data may select checkpoints and
+hyperparameters; the independent test set must not influence those choices.
+
+The causal DSAD comparison changes only beta_max:
+
+    Full_ATIC_NoDSAD: beta_max = 0
+    Full_ATIC_DSAD:   beta_max = configured positive value
+
+For the two-epoch integration pilot, the positive arm uses beta=0 in epoch 1
+and beta=beta_max in epoch 2. This is a wiring test, not an efficacy result.
+
+Architecture, initialization seed, data order, lambda, epochs, optimizer, and
+beta warm-up/ramp schedule must otherwise match.
+
+
 PHASE 1 - ESTABLISH A TRUSTWORTHY BASELINE
 ------------------------------------------
 
@@ -164,6 +189,11 @@ Training sequence:
 The teacher is training equipment only. It is not included in the compressed
 file and is not required by the receiver.
 
+The current direct implementation uses an online stop-gradient teacher: the
+SAG teacher evolves through the ordinary rate-distortion objective, but the
+DSAD term cannot update it through the target branch. A separately pretrained
+and fully frozen teacher remains a later ablation, not a current claim.
+
 Exit condition:
 
 The student predicts the teacher map accurately enough to improve real
@@ -188,13 +218,17 @@ Record:
 3. z BPP;
 4. average, minimum, and maximum gain;
 5. teacher-student map similarity; and
-6. actual-versus-estimated BPP error.
+6. payload-versus-estimated BPP calibration error; and
+7. complete-file-versus-estimated BPP gap, reported separately so the fixed
+   header is not mistaken for entropy-model error.
 
 Reason:
 
-The gain map must move a limited bit budget from low-value regions to
-high-value regions. It must not appear successful merely by increasing every
-gain value or hiding an expensive map inside z.
+Geometric-mean-one gain removes global scale as an easy shortcut, but it is
+not an equal-bitrate constraint. The method should move coding emphasis from
+low-value regions to high-value regions, and every claimed rate effect must be
+verified from actual y, z, and header bytes. It must not appear successful
+merely by increasing every gain value or hiding an expensive map inside z.
 
 
 PHASE 6 - RUN THE ESSENTIAL ABLATIONS
@@ -238,6 +272,8 @@ Report:
 7. Parameter count.
 8. z bitrate as a percentage of total bitrate.
 9. At least three random seeds.
+10. Strict deterministic-algorithm enforcement, with any unsupported CUDA
+    operation treated as an error rather than a warning.
 
 Use at least six rate points and matched actual bitrates for every comparison.
 
@@ -293,4 +329,3 @@ IMMEDIATE IMPLEMENTATION ORDER
 9. Run the controlled ablations.
 10. Attempt the Value-of-a-Bit extension only after DSAD passes its exit
     conditions.
-

@@ -103,6 +103,7 @@ class ATICCodecRoundTripTests(unittest.TestCase):
             "_cdf_length",
             "scale_table",
             "scale_bound",
+            "_log_gain_max",
         )
         return {
             name: tensor.detach().cpu().clone()
@@ -116,8 +117,9 @@ class ATICCodecRoundTripTests(unittest.TestCase):
         source = torch.rand(1, 3, 64, 64)
 
         with torch.no_grad():
-            expected = model(source)["x_hat"]
+            forward_output = model(source)
             encoded = model.compress(source, return_diagnostics=True)
+            repeated = model.compress(source, return_diagnostics=True)
             decoded = model.decompress(
                 encoded["bitstream"],
                 return_info=True,
@@ -128,7 +130,22 @@ class ATICCodecRoundTripTests(unittest.TestCase):
             encoded["entropy_diagnostics"],
             decoded["entropy_diagnostics"],
         )
-        self.assert_reconstruction_close(expected, decoded["x_hat"])
+        self.assertTrue(
+            torch.equal(
+                forward_output["gain_map"],
+                decoded["gain_map"],
+            ),
+            msg="Forward and decoder must derive the exact same gain from z_hat",
+        )
+        self.assertEqual(
+            encoded["bitstream"],
+            repeated["bitstream"],
+            msg="Repeated encoding of the same image must be deterministic",
+        )
+        self.assert_reconstruction_close(
+            forward_output["x_hat"],
+            decoded["x_hat"],
+        )
         self.assertEqual(encoded["num_bytes"], len(encoded["bitstream"]))
         self.assertEqual(
             encoded["bpp"],
@@ -160,16 +177,20 @@ class ATICCodecRoundTripTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exact checkpoint identity"):
             decoder_model.decompress(b"not-a-container")
 
-    def test_operational_stream_does_not_depend_on_teacher_projection(self):
+    def test_operational_stream_does_not_invoke_teacher_projection(self):
         model = self.make_model()
         source = torch.rand(1, 3, 64, 64)
-        first = model.compress(source)["bitstream"]
 
-        with torch.no_grad():
-            for parameter in model.entropy.attn_refine.parameters():
-                parameter.normal_(mean=100.0, std=20.0)
-        second = model.compress(source)["bitstream"]
-        self.assertEqual(first, second)
+        with mock.patch.object(
+            model.entropy,
+            "_make_teacher_map",
+            side_effect=AssertionError("teacher entered operational codec"),
+        ) as teacher:
+            first = model.compress(source)["bitstream"]
+            decoded = model.decompress(first)
+
+        teacher.assert_not_called()
+        self.assertEqual(tuple(decoded.shape), tuple(source.shape))
 
     def test_wrong_decoder_model_id_is_rejected_before_entropy_decode(self):
         source_model = self.make_model(model_id="correct")
@@ -270,6 +291,24 @@ class ATICCodecRoundTripTests(unittest.TestCase):
             restored.entropy.gaussian_conditional._quantized_cdf.numel(),
             0,
         )
+
+    def test_load_checkpoint_rejects_persisted_gain_bound_mismatch(self):
+        source_config = small_config()
+        source_config.gain_max = 3.0
+        source_model = ATICModel(source_config, H=64, W=64)
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "gain_max_3.pth"
+            torch.save(source_model.state_dict(), checkpoint)
+
+            receiver = ATICModel(small_config(), H=64, W=64)
+            with self.assertRaisesRegex(
+                ValueError,
+                "Checkpoint gain_max does not match",
+            ):
+                receiver.load_checkpoint(checkpoint, map_location="cpu")
+
+        self.assertIsNone(receiver._model_hash)
 
     def test_fresh_process_decodes_using_only_checkpoint_and_bitstream(self):
         model = self.make_model()

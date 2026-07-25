@@ -5,7 +5,12 @@ from unittest import mock
 try:
     import torch
 
-    from atic.eval import eval_single
+    from atic.eval import (
+        _bits_from_likelihoods,
+        _encoded_byte_breakdown,
+        _format_optional_metric,
+        eval_single,
+    )
 
     TORCH_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - lightweight local hosts
@@ -56,6 +61,9 @@ class _FakeCodec:
             "bitstream": token,
             "num_bytes": token * 10,
             "payload_bytes": token,
+            "header_bytes": token * 9,
+            "y_bytes": token - 1,
+            "z_bytes": 1,
         }
 
     def decompress(self, token):
@@ -69,6 +77,44 @@ class _FakeCodec:
     f"PyTorch unavailable: {TORCH_IMPORT_ERROR}",
 )
 class EvaluationAggregationTests(unittest.TestCase):
+    def test_unavailable_metric_is_not_presented_as_a_perfect_zero(self):
+        self.assertEqual(
+            _format_optional_metric({}, "LPIPS", 4),
+            "unavailable",
+        )
+        self.assertEqual(
+            _format_optional_metric({"LPIPS": 0.125}, "LPIPS", 4),
+            "0.1250",
+        )
+
+    def test_estimated_bits_clamp_probability_at_one(self):
+        bits = _bits_from_likelihoods(torch.tensor([2.0, 0.5]))
+        self.assertAlmostEqual(bits, 1.0)
+        self.assertGreaterEqual(bits, 0.0)
+
+    def test_estimated_bits_reject_malformed_likelihoods(self):
+        malformed = (
+            torch.tensor([float("nan")]),
+            torch.tensor([float("inf")]),
+            torch.tensor([-0.1]),
+        )
+        for likelihood in malformed:
+            with self.subTest(likelihood=likelihood):
+                with self.assertRaises(ValueError):
+                    _bits_from_likelihoods(likelihood)
+
+    def test_byte_breakdown_rejects_inconsistent_codec_accounting(self):
+        with self.assertRaisesRegex(ValueError, "y_bytes \\+ z_bytes"):
+            _encoded_byte_breakdown(
+                {
+                    "num_bytes": 20,
+                    "payload_bytes": 5,
+                    "header_bytes": 15,
+                    "y_bytes": 2,
+                    "z_bytes": 2,
+                }
+            )
+
     def test_actual_rate_is_pixel_weighted_and_quality_is_per_image_decode(self):
         batches = [
             torch.stack(
@@ -92,9 +138,30 @@ class EvaluationAggregationTests(unittest.TestCase):
         self.assertEqual(result["num_pixels"], 12)
         self.assertEqual(result["bitstream_bytes"], 60)
         self.assertEqual(result["payload_bytes"], 6)
+        self.assertEqual(result["y_bytes"], 3)
+        self.assertEqual(result["z_bytes"], 3)
+        self.assertEqual(result["header_bytes"], 54)
         self.assertAlmostEqual(result["BPP_actual"], 40.0)
         self.assertAlmostEqual(result["BPP_payload"], 4.0)
+        self.assertAlmostEqual(result["y_bpp_actual"], 2.0)
+        self.assertAlmostEqual(result["z_bpp_actual"], 2.0)
+        self.assertAlmostEqual(result["header_bpp"], 36.0)
+        self.assertAlmostEqual(result["z_fraction"], 0.05)
         self.assertAlmostEqual(result["BPP_estimated"], 0.25)
+        self.assertAlmostEqual(
+            result["BPP_payload_minus_estimated"],
+            3.75,
+        )
+        self.assertAlmostEqual(
+            result["BPP_actual_minus_estimated"],
+            39.75,
+        )
+        self.assertAlmostEqual(
+            result["BPP_actual"],
+            result["y_bpp_actual"]
+            + result["z_bpp_actual"]
+            + result["header_bpp"],
+        )
         # Errors are [0, 0, 1]. Per-image averaging is 1/3; the former
         # equal-per-batch averaging bug would have reported 1/2.
         self.assertAlmostEqual(result["MSE"], 1.0 / 3.0, places=6)

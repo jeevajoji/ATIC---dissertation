@@ -31,6 +31,7 @@ def entropy_buffer_snapshot(model):
         "_cdf_length",
         "scale_table",
         "scale_bound",
+        "_log_gain_max",
     )
     return {
         name: tensor.detach().cpu().clone()

@@ -1,0 +1,146 @@
+import os
+import unittest
+from dataclasses import asdict
+from unittest import mock
+
+try:
+    from ablation import (
+        ABLATION_VARIANTS,
+        CAUSAL_DSAD_VARIANTS,
+        _dsad_settings_for_variant,
+        _validate_dsad_hyperparameters,
+        _validate_study_hyperparameters,
+        build_arg_parser,
+    )
+
+    IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - lightweight local hosts
+    if os.environ.get("ATIC_REQUIRE_CODEC_TESTS") == "1":
+        raise
+    IMPORT_ERROR = exc
+
+
+@unittest.skipIf(
+    IMPORT_ERROR is not None,
+    f"ATIC training dependencies unavailable: {IMPORT_ERROR}",
+)
+class DSADAblationConfigurationTests(unittest.TestCase):
+    def test_causal_arms_have_identical_architecture(self):
+        no_dsad, dsad = CAUSAL_DSAD_VARIANTS
+        self.assertEqual(no_dsad, "Full_ATIC_NoDSAD")
+        self.assertEqual(dsad, "Full_ATIC_DSAD")
+        self.assertEqual(
+            asdict(ABLATION_VARIANTS[no_dsad]),
+            asdict(ABLATION_VARIANTS[dsad]),
+        )
+
+    def test_only_dsad_arm_receives_nonzero_beta(self):
+        no_dsad = _dsad_settings_for_variant(
+            "Full_ATIC_NoDSAD",
+            beta_max=0.05,
+            warmup_fraction=0.2,
+            ramp_fraction=0.1,
+        )
+        dsad = _dsad_settings_for_variant(
+            "Full_ATIC_DSAD",
+            beta_max=0.05,
+            warmup_fraction=0.2,
+            ramp_fraction=0.1,
+        )
+
+        self.assertEqual(no_dsad["beta_max"], 0.0)
+        self.assertEqual(dsad["beta_max"], 0.05)
+        self.assertEqual(
+            no_dsad["warmup_fraction"],
+            dsad["warmup_fraction"],
+        )
+        self.assertEqual(no_dsad["ramp_fraction"], dsad["ramp_fraction"])
+        historical = _dsad_settings_for_variant(
+            "Full_ATIC",
+            beta_max=0.05,
+            warmup_fraction=0.2,
+            ramp_fraction=0.1,
+        )
+        self.assertEqual(historical["beta_max"], 0.0)
+        self.assertEqual(
+            historical["comparison_role"],
+            "not_a_causal_dsad_arm",
+        )
+
+    def test_parser_defaults_to_controlled_pair_and_pilot_schedule(self):
+        empty_env = {
+            "ATIC_VARIANTS": "",
+            "ATIC_DSAD_BETA_MAX": "",
+            "ATIC_DSAD_WARMUP_FRACTION": "",
+            "ATIC_DSAD_RAMP_FRACTION": "",
+        }
+        with mock.patch.dict(os.environ, empty_env):
+            args = build_arg_parser().parse_args([])
+
+        self.assertEqual(
+            args.variants,
+            "Full_ATIC_NoDSAD,Full_ATIC_DSAD",
+        )
+        self.assertEqual(args.dsad_beta_max, 0.05)
+        self.assertEqual(args.dsad_warmup_fraction, 0.20)
+        self.assertEqual(args.dsad_ramp_fraction, 0.10)
+
+    def test_schedule_validation_rejects_invalid_values(self):
+        invalid_values = (
+            (-0.01, 0.2, 0.1),
+            (0.05, -0.1, 0.1),
+            (0.05, 0.2, 1.1),
+            (0.05, 0.8, 0.3),
+            (float("nan"), 0.2, 0.1),
+        )
+        for values in invalid_values:
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    _validate_dsad_hyperparameters(*values)
+
+    def test_study_validation_rejects_silent_noop_or_overwrite_inputs(self):
+        valid = {
+            "epochs": 2,
+            "batch_size": 1,
+            "height": 64,
+            "width": 64,
+            "val_every": 2,
+            "num_workers": 0,
+            "seeds": [42],
+            "lambda_rates": [0.0067],
+            "run_variants": [
+                "Full_ATIC_NoDSAD",
+                "Full_ATIC_DSAD",
+            ],
+        }
+        _validate_study_hyperparameters(**valid)
+
+        invalid_overrides = (
+            {"epochs": 0},
+            {"batch_size": 0},
+            {"val_every": 1},
+            {"num_workers": -1},
+            {"seeds": []},
+            {"seeds": [42, 42]},
+            {"lambda_rates": []},
+            {"lambda_rates": [float("nan")]},
+            {"lambda_rates": [-0.1]},
+            {"lambda_rates": [0.0067, 0.0067]},
+            {"run_variants": []},
+            {
+                "run_variants": [
+                    "Full_ATIC_DSAD",
+                    "Full_ATIC_DSAD",
+                ]
+            },
+        )
+        for override in invalid_overrides:
+            with self.subTest(override=override):
+                candidate = dict(valid)
+                candidate.update(override)
+                with self.assertRaises(ValueError):
+                    _validate_study_hyperparameters(**candidate)
+
+
+if __name__ == "__main__":
+    unittest.main()
