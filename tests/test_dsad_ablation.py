@@ -8,6 +8,8 @@ try:
         ABLATION_VARIANTS,
         CAUSAL_DSAD_VARIANTS,
         _dsad_settings_for_variant,
+        _evaluation_plan,
+        _validate_dataset_protocol,
         _validate_dsad_hyperparameters,
         _validate_study_hyperparameters,
         build_arg_parser,
@@ -74,7 +76,7 @@ class DSADAblationConfigurationTests(unittest.TestCase):
             "ATIC_DSAD_WARMUP_FRACTION": "",
             "ATIC_DSAD_RAMP_FRACTION": "",
         }
-        with mock.patch.dict(os.environ, empty_env):
+        with mock.patch.dict(os.environ, empty_env, clear=True):
             args = build_arg_parser().parse_args([])
 
         self.assertEqual(
@@ -84,6 +86,57 @@ class DSADAblationConfigurationTests(unittest.TestCase):
         self.assertEqual(args.dsad_beta_max, 0.05)
         self.assertEqual(args.dsad_warmup_fraction, 0.20)
         self.assertEqual(args.dsad_ramp_fraction, 0.10)
+        self.assertIsNone(args.dataset_root)
+        self.assertIsNone(args.frozen_split_dir)
+        self.assertFalse(args.evaluate_test)
+
+    def test_frozen_protocol_requires_a_complete_pair_and_test_is_opt_in(self):
+        self.assertEqual(_evaluation_plan(False), ("val",))
+        self.assertEqual(_evaluation_plan(True), ("val", "test"))
+        self.assertFalse(_validate_dataset_protocol(None, None, False))
+        self.assertTrue(
+            _validate_dataset_protocol("/data", "/splits/v1", False)
+        )
+        self.assertTrue(
+            _validate_dataset_protocol("/data", "/splits/v1", True)
+        )
+        for values in (
+            ("/data", None, False),
+            (None, "/splits/v1", False),
+            (None, None, True),
+        ):
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    _validate_dataset_protocol(*values)
+
+        args = build_arg_parser().parse_args(
+            [
+                "--dataset-root",
+                "/data",
+                "--frozen-split-dir",
+                "/splits/v1",
+            ]
+        )
+        self.assertFalse(args.evaluate_test)
+        with mock.patch.dict(
+            os.environ,
+            {"ATIC_EVALUATE_TEST": "true"},
+            clear=False,
+        ):
+            self.assertFalse(
+                build_arg_parser().parse_args([]).evaluate_test
+            )
+        self.assertTrue(
+            build_arg_parser().parse_args(
+                [
+                    "--dataset-root",
+                    "/data",
+                    "--frozen-split-dir",
+                    "/splits/v1",
+                    "--evaluate-test",
+                ]
+            ).evaluate_test
+        )
 
     def test_schedule_validation_rejects_invalid_values(self):
         invalid_values = (

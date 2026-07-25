@@ -15,15 +15,24 @@ need the original image or private encoder features.
 CURRENT EXECUTION GATE
 ----------------------
 
-Implement and run a two-epoch, one-lambda, one-seed integration pilot for the
-identical Full_ATIC_NoDSAD and Full_ATIC_DSAD architectures. This pilot may
-verify gradients, schedules, logging, checkpointing, real bitstreams, and
-metric accounting only.
+The two-epoch, one-lambda, one-seed integration pilot for the identical
+Full_ATIC_NoDSAD and Full_ATIC_DSAD architectures is complete. It passed
+gradient, schedule, logging, checkpoint, real-bitstream, and metric-accounting
+checks. At 0.479 BPP, the paired DSAD arm changed actual BPP by -0.000183 and
+PSNR by +0.000060 dB. These approximately six bytes per 512x512 image are
+directionally favourable but scientifically negligible; they are recorded
+only as evidence that the mechanism is connected correctly.
 
 Do not begin long training or report rate-distortion conclusions until the
 training, validation, and independent test manifests are leakage-free,
 inspected, and frozen. Validation data may select checkpoints and
 hyperparameters; the independent test set must not influence those choices.
+
+The next hard gate is a versioned frozen split bundle with sequence-disjoint
+train, validation, and test manifests. Test evaluation remains locked during
+model and hyperparameter selection. After this gate, run a three-seed
+screening study and advance only if validation BD-rate improves consistently;
+otherwise strengthen the teacher target before spending more GPU time.
 
 The causal DSAD comparison changes only beta_max:
 
