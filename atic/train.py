@@ -37,6 +37,8 @@ LOSS_LOG_KEYS = (
     "student_gain_std",
     "teacher_spatial_std",
 )
+VALIDATION_MIN_KEYS = {"student_gain_min"}
+VALIDATION_MAX_KEYS = {"student_gain_max"}
 
 
 def dsad_beta_for_epoch(
@@ -257,7 +259,16 @@ def validate_loop(
 
     model.eval()
 
-    totals = {f"val_{key}": 0.0 for key in LOSS_LOG_KEYS}
+    totals = {
+        f"val_{key}": (
+            math.inf
+            if key in VALIDATION_MIN_KEYS
+            else -math.inf
+            if key in VALIDATION_MAX_KEYS
+            else 0.0
+        )
+        for key in LOSS_LOG_KEYS
+    }
     steps = 0
 
     for batch in dataloader:
@@ -267,7 +278,14 @@ def validate_loop(
         loss_dict = criterion(outputs, batch, beta=beta)
 
         for key in LOSS_LOG_KEYS:
-            totals[f"val_{key}"] += float(loss_dict[key].item())
+            name = f"val_{key}"
+            value = float(loss_dict[key].item())
+            if key in VALIDATION_MIN_KEYS:
+                totals[name] = min(totals[name], value)
+            elif key in VALIDATION_MAX_KEYS:
+                totals[name] = max(totals[name], value)
+            else:
+                totals[name] += value
 
         steps += 1
 
@@ -276,7 +294,16 @@ def validate_loop(
     if steps == 0:
         return None
 
-    return {k: v / steps for k, v in totals.items()}
+    return {
+        key: (
+            value
+            if key.removeprefix("val_") in (
+                VALIDATION_MIN_KEYS | VALIDATION_MAX_KEYS
+            )
+            else value / steps
+        )
+        for key, value in totals.items()
+    }
 
 
 def train_loop(

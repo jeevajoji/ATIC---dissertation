@@ -557,6 +557,7 @@ def run_ablation_study(
     from atic.model import ATICModel
     from atic.repro import (
         get_environment_snapshot,
+        hash_model_state,
         set_global_determinism,
         utc_timestamp,
         write_json,
@@ -590,7 +591,11 @@ def run_ablation_study(
     )
     evaluation_plan = _evaluation_plan(evaluate_test)
 
-    device = device if torch.cuda.is_available() else "cpu"
+    if str(device).lower().startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"CUDA device requested ({device}) but CUDA is unavailable; "
+            "refusing a silent CPU fallback."
+        )
     print(f"Device: {device}")
     if evaluate_test:
         print("!" * 72)
@@ -852,6 +857,15 @@ def run_ablation_study(
                     if generator is not None:
                         generator.manual_seed(seed + loader_index)
                 model = ATICModel(config, H=height, W=width).to(device)
+                initial_state_sha256 = hash_model_state(model)
+                write_json(
+                    os.path.join(run_dir, "initial_state.json"),
+                    {
+                        "sha256": initial_state_sha256,
+                        "seed": seed,
+                        "variant": variant_name,
+                    },
+                )
 
                 train_artifacts = train_loop(
                     model,
@@ -935,6 +949,7 @@ def run_ablation_study(
                     "seed": seed,
                     "lambda_rd": lam,
                     "dsad_beta_max": dsad_settings["beta_max"],
+                    "initial_state_sha256": initial_state_sha256,
                     "checkpoint_path": train_artifacts.get("checkpoint_path"),
                     "data_protocol": data_protocol,
                     "evaluation_split": evaluation_split,

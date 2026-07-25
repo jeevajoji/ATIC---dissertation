@@ -52,6 +52,32 @@ validation BD-rate is consistently favourable across three paired seeds and
 the gain is materially larger than pilot noise. Do not pass --evaluate-test
 until all choices and the analysis plan are frozen.
 
+Immediate beta calibration
+--------------------------
+The two-epoch pilot used beta 0.05. Its weighted DSAD term was only about
+0.0042 percent of the rate-distortion objective, so that pilot tested wiring
+rather than useful distillation strength.
+
+Run the one-command calibration:
+
+  CUDA_DEVICE_ORDER=PCI_BUS_ID \
+  CUDA_VISIBLE_DEVICES=0,1 \
+  CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+  PYTHONHASHSEED=42 \
+  python -m atic.dsad_screen
+
+This runs beta 0.5, 2 and 8 against a fresh same-GPU beta-zero control at
+lambda 0.0067, seed 42, batch size 4 and 12 epochs. Two isolated processes use
+physical GPUs 0 and 1. This means six model trainings in total; GPU 0 runs two
+complete pairs and GPU 1 runs one. Every pair uses actual validation
+bitstreams. The runner refuses a modified or stale repository, a wrong frozen
+bundle, a missing GPU, silent CPU fallback, or test evaluation.
+
+This is calibration, not evidence for the paper claim. Select one beta only
+after checking actual validation rate-distortion, DSAD alignment and gain-map
+saturation. Then freeze it and confirm with seeds 42, 123 and 999 before a
+multi-lambda study.
+
 Scientific boundary
 -------------------
 These crops come from only five sequences in the same UVG capture family.

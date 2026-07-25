@@ -194,6 +194,24 @@ class DSADAblationConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _validate_study_hyperparameters(**candidate)
 
+    def test_cuda_request_never_silently_falls_back_to_cpu(self):
+        from ablation import run_ablation_study
+
+        with mock.patch("ablation.torch.cuda.is_available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "silent CPU fallback"):
+                run_ablation_study(
+                    device="cuda:0",
+                    epochs=1,
+                    batch_size=1,
+                    height=64,
+                    width=64,
+                    val_every=2,
+                    num_workers=0,
+                    run_variants=["Full_ATIC_NoDSAD"],
+                    lambda_rates=[0.0067],
+                    seeds=[42],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

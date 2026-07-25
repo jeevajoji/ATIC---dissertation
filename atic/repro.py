@@ -4,6 +4,7 @@ repro.py - Reproducibility helpers for ATIC experiments.
 Provides deterministic setup, run metadata capture, and JSON utilities so
 ablation runs can be reproduced from saved artifacts.
 """
+import hashlib
 import json
 import os
 import platform
@@ -42,13 +43,14 @@ def set_global_determinism(seed: int, deterministic: bool = True) -> None:
     if deterministic:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        try:
-            torch.use_deterministic_algorithms(True, warn_only=True)
-        except Exception:
-            pass
+        # Publication runs must fail instead of silently continuing through a
+        # nondeterministic CUDA kernel.  Callers can explicitly opt out with
+        # deterministic=False for exploratory work.
+        torch.use_deterministic_algorithms(True)
     else:
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
+        torch.use_deterministic_algorithms(False)
 
 
 def seed_worker(worker_id: int) -> None:
@@ -64,6 +66,26 @@ def make_torch_generator(seed: int) -> torch.Generator:
     gen = torch.Generator()
     gen.manual_seed(seed)
     return gen
+
+
+def hash_model_state(model: torch.nn.Module) -> str:
+    """Hash model tensors in a stable name/dtype/shape/bytes order."""
+
+    digest = hashlib.sha256()
+
+    def update_framed(payload: bytes) -> None:
+        digest.update(len(payload).to_bytes(8, byteorder="big"))
+        digest.update(payload)
+
+    for name, tensor in sorted(model.state_dict().items()):
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"State entry {name!r} is not a tensor")
+        value = tensor.detach().cpu().contiguous()
+        update_framed(name.encode("utf-8"))
+        update_framed(str(value.dtype).encode("ascii"))
+        update_framed(json.dumps(list(value.shape)).encode("ascii"))
+        update_framed(value.view(torch.uint8).numpy().tobytes(order="C"))
+    return digest.hexdigest()
 
 
 def _run_git_command(repo_dir: str, args: list[str]) -> Optional[str]:
@@ -100,18 +122,39 @@ def get_environment_snapshot(device: str, repo_dir: str) -> Dict[str, Any]:
         "platform": platform.platform(),
         "torch_version": torch.__version__,
         "cuda_available": torch.cuda.is_available(),
+        "cuda_device_count": torch.cuda.device_count(),
         "cuda_version": getattr(getattr(torch, "version", None), "cuda", None),
         "cudnn_version": torch.backends.cudnn.version(),
+        "deterministic_algorithms_enabled": (
+            torch.are_deterministic_algorithms_enabled()
+        ),
         "requested_device": device,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "process_environment": {
+            key: os.environ.get(key)
+            for key in (
+                "CUDA_DEVICE_ORDER",
+                "CUDA_VISIBLE_DEVICES",
+                "CUBLAS_WORKSPACE_CONFIG",
+                "PYTHONHASHSEED",
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+            )
+        },
     }
 
     if torch.cuda.is_available():
         try:
-            snapshot["gpu_name"] = torch.cuda.get_device_name(0)
+            snapshot["visible_gpu_names"] = [
+                torch.cuda.get_device_name(index)
+                for index in range(torch.cuda.device_count())
+            ]
+            snapshot["gpu_name"] = snapshot["visible_gpu_names"][0]
         except Exception:
+            snapshot["visible_gpu_names"] = None
             snapshot["gpu_name"] = None
     else:
+        snapshot["visible_gpu_names"] = []
         snapshot["gpu_name"] = None
 
     snapshot["git"] = get_git_snapshot(repo_dir)
