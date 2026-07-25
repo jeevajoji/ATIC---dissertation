@@ -1,0 +1,353 @@
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from dataclasses import asdict
+from pathlib import Path
+from unittest import mock
+
+try:
+    import torch
+    from PIL import Image
+
+    from atic.bitstream import (
+        ATICBitstreamError,
+        pack_atic,
+        sha256_file,
+        unpack_atic,
+    )
+    from atic.config import ArchitectureConfig
+    from atic.model import ATICModel
+
+    CODEC_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - exercised on lightweight hosts
+    if os.environ.get("ATIC_REQUIRE_CODEC_TESTS") == "1":
+        raise
+    CODEC_IMPORT_ERROR = exc
+
+
+def small_config():
+    return ArchitectureConfig(
+        patch_size=8,
+        token_dim=8,
+        use_overlapping_patches=True,
+        swin_stages=4,
+        depths=[2, 2, 2, 2],
+        num_heads_enc=[1, 2, 4, 8],
+        window_size=2,
+        use_sag=True,
+        use_cbam=True,
+        use_adaptive_quant=True,
+        use_hyperprior=True,
+    )
+
+
+@unittest.skipIf(
+    CODEC_IMPORT_ERROR is not None,
+    f"PyTorch/CompressAI codec stack unavailable: {CODEC_IMPORT_ERROR}",
+)
+class ATICCodecRoundTripTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(1)
+
+    def make_model(self, height=64, width=64, model_id="unit-model"):
+        torch.manual_seed(1234)
+        model = ATICModel(
+            small_config(),
+            H=height,
+            W=width,
+            model_id=model_id,
+        )
+        model.eval()
+        model.update(force=True)
+        return model
+
+    def test_real_entropy_round_trip_matches_eval_forward(self):
+        model = self.make_model()
+        source = torch.rand(1, 3, 64, 64)
+
+        expected = model(source)["x_hat"]
+        encoded = model.compress(source)
+        actual = model.decompress(encoded["bitstream"])
+
+        self.assertTrue(torch.equal(expected, actual))
+        self.assertEqual(encoded["num_bytes"], len(encoded["bitstream"]))
+        self.assertEqual(
+            encoded["bpp"],
+            len(encoded["bitstream"]) * 8 / (64 * 64),
+        )
+        container = unpack_atic(encoded["bitstream"])
+        self.assertEqual(
+            encoded["payload_bytes"],
+            len(container.z_string) + len(container.y_string),
+        )
+        self.assertEqual(
+            model.entropy.entropy_bottleneck.entropy_coder.name,
+            "ans",
+        )
+        self.assertEqual(
+            model.entropy.gaussian_conditional.entropy_coder.name,
+            "ans",
+        )
+
+    def test_unbound_random_weights_cannot_create_or_accept_streams(self):
+        source_model = ATICModel(small_config(), H=64, W=64)
+        decoder_model = ATICModel(small_config(), H=64, W=64)
+        source_model.eval()
+        decoder_model.eval()
+        source = torch.rand(1, 3, 64, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "exact checkpoint identity"):
+            source_model.compress(source)
+        with self.assertRaisesRegex(RuntimeError, "exact checkpoint identity"):
+            decoder_model.decompress(b"not-a-container")
+
+    def test_operational_stream_does_not_depend_on_teacher_projection(self):
+        model = self.make_model()
+        source = torch.rand(1, 3, 64, 64)
+        first = model.compress(source)["bitstream"]
+
+        with torch.no_grad():
+            for parameter in model.entropy.attn_refine.parameters():
+                parameter.normal_(mean=100.0, std=20.0)
+        second = model.compress(source)["bitstream"]
+        self.assertEqual(first, second)
+
+    def test_wrong_decoder_model_id_is_rejected_before_entropy_decode(self):
+        source_model = self.make_model(model_id="correct")
+        source = torch.rand(1, 3, 64, 64)
+        encoded = source_model.compress(source)["bitstream"]
+
+        wrong_decoder = self.make_model(model_id="wrong")
+        wrong_decoder.load_state_dict(source_model.state_dict())
+        with self.assertRaisesRegex(ATICBitstreamError, "checkpoint hash"):
+            wrong_decoder.decompress(encoded)
+
+    def test_forged_latent_shape_is_rejected_before_entropy_decode(self):
+        model = self.make_model()
+        source = torch.rand(1, 3, 64, 64)
+        container = unpack_atic(model.compress(source)["bitstream"])
+        forged = pack_atic(
+            z_string=container.z_string,
+            y_string=container.y_string,
+            original_width=container.original_width,
+            original_height=container.original_height,
+            coded_width=container.coded_width,
+            coded_height=container.coded_height,
+            y_width=container.y_width,
+            y_height=container.y_height + 1,
+            z_width=container.z_width,
+            z_height=container.z_height,
+            y_channels=container.y_channels,
+            model_hash=container.model_hash,
+            flags=container.flags,
+            quality_id=container.quality_id,
+            bit_depth=container.bit_depth,
+            colorspace=container.colorspace,
+            entropy_coder=container.entropy_coder,
+        )
+
+        with mock.patch.object(
+            model.entropy,
+            "decompress",
+            wraps=model.entropy.decompress,
+        ) as entropy_decode:
+            with self.assertRaisesRegex(ATICBitstreamError, "y shape"):
+                model.decompress(forged)
+            entropy_decode.assert_not_called()
+
+    def test_odd_latent_dimensions_round_trip(self):
+        model = self.make_model(height=72, width=88)
+        source = torch.rand(1, 3, 72, 88)
+        expected = model(source)["x_hat"]
+        encoded = model.compress(source)
+        reconstructed = model.decompress(encoded["bitstream"])
+        container = unpack_atic(encoded["bitstream"])
+
+        self.assertEqual(tuple(reconstructed.shape), (1, 3, 72, 88))
+        self.assertTrue(torch.equal(expected, reconstructed))
+        self.assertEqual(
+            (container.original_height, container.original_width),
+            (72, 88),
+        )
+        self.assertEqual((container.y_height, container.y_width), (3, 3))
+        self.assertEqual((container.z_height, container.z_width), (1, 1))
+
+    def test_legacy_empty_gaussian_buffers_are_rebuilt_after_loading(self):
+        source_model = self.make_model()
+        state_dict = source_model.state_dict()
+        for suffix in (
+            "_quantized_cdf",
+            "_offset",
+            "_cdf_length",
+            "scale_table",
+        ):
+            key = f"entropy.gaussian_conditional.{suffix}"
+            state_dict[key] = torch.empty(0, dtype=state_dict[key].dtype)
+
+        restored = ATICModel(
+            small_config(),
+            H=64,
+            W=64,
+            model_id="legacy-checkpoint",
+        )
+        restored.load_state_dict(state_dict, strict=True)
+        restored.update(force=True)
+
+        self.assertGreater(
+            restored.entropy.gaussian_conditional.scale_table.numel(),
+            0,
+        )
+        self.assertGreater(
+            restored.entropy.gaussian_conditional._quantized_cdf.numel(),
+            0,
+        )
+
+    def test_fresh_process_decodes_using_only_checkpoint_and_bitstream(self):
+        model = self.make_model()
+        source = torch.rand(1, 3, 64, 64)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.pth"
+            bitstream = root / "image.atic"
+            subprocess_output = root / "decoded.pt"
+
+            # Save populated entropy buffers to exercise registered-buffer
+            # resizing when a fresh ATICModel loads the checkpoint.
+            torch.save(model.state_dict(), checkpoint)
+            model.set_model_id(sha256_file(checkpoint))
+            model.compress(source, output_path=bitstream)
+            expected = model.decompress(bitstream)
+
+            command = [
+                sys.executable,
+                "-m",
+                "tests.fresh_decode_helper",
+                "--checkpoint",
+                str(checkpoint),
+                "--bitstream",
+                str(bitstream),
+                "--output",
+                str(subprocess_output),
+                "--height",
+                "64",
+                "--width",
+                "64",
+            ]
+            completed = subprocess.run(
+                command,
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+            )
+            try:
+                actual = torch.load(
+                    subprocess_output,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+            except TypeError:
+                actual = torch.load(subprocess_output, map_location="cpu")
+            self.assertTrue(torch.equal(expected.cpu(), actual))
+
+    def test_cli_png_to_atic_to_png_in_separate_processes(self):
+        model = self.make_model()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model.pth"
+            run_config = root / "run_config.json"
+            source_image = root / "source.png"
+            bitstream = root / "image.atic"
+            decoded_image = root / "decoded.png"
+
+            torch.save(model.state_dict(), checkpoint)
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "height": 64,
+                        "width": 64,
+                        "architecture": asdict(small_config()),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            Image.new("RGB", (64, 64), color=(31, 127, 223)).save(source_image)
+
+            common = [
+                "--checkpoint",
+                str(checkpoint),
+                "--config",
+                str(run_config),
+            ]
+            compress_command = [
+                sys.executable,
+                "-m",
+                "atic.codec_cli",
+                "compress",
+                "--input",
+                str(source_image),
+                "--output",
+                str(bitstream),
+                *common,
+            ]
+            compress_result = subprocess.run(
+                compress_command,
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                compress_result.returncode,
+                0,
+                msg=(
+                    f"stdout:\n{compress_result.stdout}\n"
+                    f"stderr:\n{compress_result.stderr}"
+                ),
+            )
+            self.assertTrue(bitstream.is_file())
+
+            decompress_command = [
+                sys.executable,
+                "-m",
+                "atic.codec_cli",
+                "decompress",
+                "--input",
+                str(bitstream),
+                "--output",
+                str(decoded_image),
+                *common,
+            ]
+            decompress_result = subprocess.run(
+                decompress_command,
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                decompress_result.returncode,
+                0,
+                msg=(
+                    f"stdout:\n{decompress_result.stdout}\n"
+                    f"stderr:\n{decompress_result.stderr}"
+                ),
+            )
+            with Image.open(decoded_image) as decoded:
+                self.assertEqual(decoded.mode, "RGB")
+                self.assertEqual(decoded.size, (64, 64))
+
+
+if __name__ == "__main__":
+    unittest.main()

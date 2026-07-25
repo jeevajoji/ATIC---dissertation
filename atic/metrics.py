@@ -71,7 +71,6 @@ class ATICMetrics:
         return metrics
 
 import os
-import matplotlib.pyplot as plt
 
 def plot_rate_distortion_curves(results_dict, metrics_to_plot=['PSNR', 'SSIM', 'MS-SSIM', 'LPIPS', 'DISTS'], save_dir="ablation_results/plots"):
     """
@@ -90,6 +89,8 @@ def plot_rate_distortion_curves(results_dict, metrics_to_plot=['PSNR', 'SSIM', '
         }
     }
     """
+    import matplotlib.pyplot as plt
+
     os.makedirs(save_dir, exist_ok=True)
     
     for metric in metrics_to_plot:

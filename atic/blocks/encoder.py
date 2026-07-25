@@ -8,12 +8,12 @@ encoder.py — ATIC Block 2: Swin Transformer Encoder
 
 Spatial dimensions for 1920×1080 input (tokenizer: patch=16, stride=8, pad=4):
     Token grid in  :  135 × 240,  128ch
-    After stage 1  :   67 × 120,  256ch
-    After stage 2  :   33 ×  60,  512ch
-    After stage 3  :   16 ×  30, 1024ch
-    Stage 4 output :   16 ×  30, 1024ch  (no spatial downsampling)
+    After stage 1  :   68 × 120,  256ch
+    After stage 2  :   34 ×  60,  512ch
+    After stage 3  :   17 ×  30, 1024ch
+    Stage 4 output :   17 ×  30, 1024ch  (no spatial downsampling)
 
-Latent shape: (B, 1024, 16, 30)
+Latent shape: (B, 1024, 17, 30)
 
 The spatial attention map from Stage 4 (most semantically meaningful)
 is returned and passed to the adaptive quantizer (Block 3).
@@ -216,12 +216,12 @@ class SwinEncoder(nn.Module):
     ATIC Block 2: 4-stage Swin Transformer Encoder.
 
     Stage shapes (1920×1080 input):
-        Stage 1: 135×240, 128ch  →  67×120, 256ch
-        Stage 2:  67×120, 256ch  →  33×60,  512ch
-        Stage 3:  33×60,  512ch  →  16×30, 1024ch
-        Stage 4:  16×30, 1024ch  →  16×30, 1024ch  (no downsampling)
+        Stage 1: 135×240, 128ch  →  68×120, 256ch
+        Stage 2:  68×120, 256ch  →  34×60,  512ch
+        Stage 3:  34×60,  512ch  →  17×30, 1024ch
+        Stage 4:  17×30, 1024ch  →  17×30, 1024ch  (no downsampling)
 
-    Latent output: (B, 1024, 16, 30)
+    Latent output: (B, 1024, 17, 30)
 
     The spatial attention map from Stage 4 is returned to the quantizer.
 
@@ -286,7 +286,7 @@ class SwinEncoder(nn.Module):
             x: (B, embed_dim, H_t, W_t)  — token grid from tokenizer
 
         Returns:
-            latent   : (B, 1024, 16, 30)  — encoder output
+            latent   : (B, 1024, 17, 30)  — encoder output
             attn_map : (B, 1, H4, W4) or None  — deepest spatial attn map
                        passed to the adaptive quantizer
         """

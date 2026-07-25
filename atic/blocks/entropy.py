@@ -7,8 +7,8 @@ entropy path.
 
 Pipeline:
     y                  : encoder latent
-    adaptive gain      : optional attention-guided latent scaling
-    z = h_a(|y_scaled|): hyper-analysis transform
+    adaptive gain      : decoder-synchronised hyperprior latent scaling
+    z = h_a(|y|)       : hyper-analysis transform
     z_hat              : EntropyBottleneck quantisation + likelihoods
     params = h_s(z_hat): predicts Gaussian scales and means
     y_hat_scaled       : GaussianConditional quantisation + likelihoods
@@ -18,13 +18,14 @@ Returned likelihoods are used to compute BPP:
     BPP = sum(-log2(likelihoods)) / num_pixels
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from compressai.entropy_models import EntropyBottleneck, GaussianConditional
+from compressai.models.base import get_scale_table
 
 
 class CompressAIHyperpriorEntropy(nn.Module):
@@ -50,7 +51,10 @@ class CompressAIHyperpriorEntropy(nn.Module):
         )
 
         # Entropy bottleneck for hyperlatent z
-        self.entropy_bottleneck = EntropyBottleneck(hyper_dim)
+        self.entropy_bottleneck = EntropyBottleneck(
+            hyper_dim,
+            entropy_coder="ans",
+        )
 
         # Hyper-synthesis: z_hat -> Gaussian params for y
         # Output: latent_dim scales + latent_dim means + optional 1 gain logit
@@ -77,9 +81,13 @@ class CompressAIHyperpriorEntropy(nn.Module):
         )
 
         # Gaussian conditional entropy model for main latent y
-        self.gaussian_conditional = GaussianConditional(None)
+        self.gaussian_conditional = GaussianConditional(
+            None,
+            entropy_coder="ans",
+        )
 
-        # Refines SAG attention map into a decoder-available gain prior
+        # Training-only teacher projection retained for the later DSAD phase.
+        # It is never used to construct an operational entropy bitstream.
         self.attn_refine = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, padding=1, bias=False),
             nn.ReLU(inplace=True),
@@ -88,48 +96,70 @@ class CompressAIHyperpriorEntropy(nn.Module):
         )
 
     @staticmethod
-    def _crop_like(src: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return src[:, :, : target.size(2), : target.size(3)]
+    def _crop_to_spatial(
+        src: torch.Tensor,
+        spatial_shape: Sequence[int],
+    ) -> torch.Tensor:
+        height, width = (int(value) for value in spatial_shape)
+        if height <= 0 or width <= 0:
+            raise ValueError("Spatial dimensions must be positive")
+        if src.size(2) < height or src.size(3) < width:
+            raise ValueError(
+                "Hyper-synthesis output is smaller than the declared y shape: "
+                f"{tuple(src.shape[-2:])} versus {(height, width)}"
+            )
+        return src[:, :, :height, :width]
+
+    def _split_hyper_params(
+        self,
+        z_hat: torch.Tensor,
+        y_spatial_shape: Sequence[int],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hyper_params = self._crop_to_spatial(
+            self.h_s(z_hat),
+            y_spatial_shape,
+        )
+        scales_hat = hyper_params[:, : self.latent_dim, :, :]
+        means_hat = hyper_params[
+            :, self.latent_dim : 2 * self.latent_dim, :, :
+        ]
+        gain_logits = hyper_params[
+            :, 2 * self.latent_dim : 2 * self.latent_dim + 1, :, :
+        ]
+        return scales_hat.abs().clamp(min=1e-6), means_hat, gain_logits
 
     def _make_gain_map(
         self,
-        y: torch.Tensor,
-        attn_map: Optional[torch.Tensor],
         gain_logits: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Creates spatial gain map.
+        """Create the operational, decoder-reproducible gain map.
 
-        If adaptive quantisation is disabled, returns ones.
-        If enabled, combines hyperprior-predicted gain with optional SAG attention.
+        The only input is produced by hyper-synthesis from decoded ``z_hat``.
+        Therefore the encoder and decoder can calculate exactly the same map
+        without transmitting a separate attention tensor.
         """
-        B, _, H, W = y.shape
-
         if not self.use_adaptive_quant:
-            return torch.ones(B, 1, H, W, device=y.device, dtype=y.dtype)
+            return torch.ones_like(gain_logits)
+        return torch.sigmoid(gain_logits) + self.gain_min
 
-        # Gain predicted from hyper-synthesis branch
-        gain_from_hyper = torch.sigmoid(gain_logits) + self.gain_min
+    def _make_teacher_map(
+        self,
+        attn_map: Optional[torch.Tensor],
+        spatial_shape: Sequence[int],
+    ) -> Optional[torch.Tensor]:
+        """Project encoder attention for observation/distillation only."""
 
         if attn_map is None:
-            return gain_from_hyper
-
-        if attn_map.shape[-2:] != (H, W):
+            return None
+        target_shape = tuple(int(value) for value in spatial_shape)
+        if attn_map.shape[-2:] != target_shape:
             attn_map = F.interpolate(
                 attn_map,
-                size=(H, W),
+                size=target_shape,
                 mode="bilinear",
                 align_corners=False,
             )
-
-        gain_from_attn = self.attn_refine(attn_map) + self.gain_min
-
-        # Blend both signals.
-        # Hyperprior signal is decoder-available.
-        # Attention signal is derived from encoder, so for true codec use this needs care.
-        gain_map = 0.5 * gain_from_hyper + 0.5 * gain_from_attn
-
-        return gain_map
+        return self.attn_refine(attn_map) + self.gain_min
 
     def forward(
         self,
@@ -154,16 +184,12 @@ class CompressAIHyperpriorEntropy(nn.Module):
 
         z_hat, z_likelihoods = self.entropy_bottleneck(z)
 
-        hyper_params = self.h_s(z_hat)
-        hyper_params = self._crop_like(hyper_params, y)
-
-        scales_hat = hyper_params[:, : self.latent_dim, :, :]
-        means_hat = hyper_params[:, self.latent_dim : 2 * self.latent_dim, :, :]
-        gain_logits = hyper_params[:, 2 * self.latent_dim : 2 * self.latent_dim + 1, :, :]
-
-        scales_hat = scales_hat.abs().clamp(min=1e-6)
-
-        gain_map = self._make_gain_map(y, attn_map, gain_logits)
+        scales_hat, means_hat, gain_logits = self._split_hyper_params(
+            z_hat,
+            y.shape[-2:],
+        )
+        gain_map = self._make_gain_map(gain_logits)
+        teacher_map = self._make_teacher_map(attn_map, y.shape[-2:])
 
         y_scaled = y * gain_map
 
@@ -186,7 +212,123 @@ class CompressAIHyperpriorEntropy(nn.Module):
                 "gain_map": gain_map,
                 "scales_hat": scales_hat,
                 "means_hat": means_hat,
+                "teacher_map": teacher_map,
             }
             return y_hat, likelihoods, aux
 
         return y_hat, likelihoods
+
+    def update(self, force: bool = False) -> bool:
+        """Build the CDF tables required by the real entropy coder."""
+
+        updated = bool(self.entropy_bottleneck.update(force=force))
+        updated = bool(
+            self.gaussian_conditional.update_scale_table(
+                get_scale_table(),
+                force=force,
+            )
+        ) or updated
+        return updated
+
+    def _require_rans(self) -> None:
+        coders = (
+            self.entropy_bottleneck.entropy_coder.name,
+            self.gaussian_conditional.entropy_coder.name,
+        )
+        if coders != ("ans", "ans"):
+            raise RuntimeError(
+                "ATIC version 1 requires CompressAI's rANS entropy backend"
+            )
+
+    @torch.no_grad()
+    def compress(self, y: torch.Tensor) -> Dict[str, object]:
+        """Entropy-code ``y`` and its hyperlatent using decoder-safe context."""
+
+        if y.ndim != 4 or y.size(1) != self.latent_dim:
+            raise ValueError(
+                f"Expected y with shape (N,{self.latent_dim},H,W), "
+                f"received {tuple(y.shape)}"
+            )
+        if self.training:
+            raise RuntimeError("Entropy compression requires eval() mode")
+
+        self._require_rans()
+        self.update(force=False)
+        z = self.h_a(torch.abs(y))
+        z_strings = self.entropy_bottleneck.compress(z)
+        z_hat = self.entropy_bottleneck.decompress(
+            z_strings,
+            z.size()[-2:],
+        )
+
+        scales_hat, means_hat, gain_logits = self._split_hyper_params(
+            z_hat,
+            y.shape[-2:],
+        )
+        gain_map = self._make_gain_map(gain_logits)
+        y_scaled = y * gain_map
+        indexes = self.gaussian_conditional.build_indexes(scales_hat)
+        y_strings = self.gaussian_conditional.compress(
+            y_scaled,
+            indexes,
+            means=means_hat,
+        )
+
+        return {
+            "y_strings": y_strings,
+            "z_strings": z_strings,
+            "y_shape": tuple(int(value) for value in y.shape[1:]),
+            "z_shape": tuple(int(value) for value in z.shape[1:]),
+            "gain_map": gain_map,
+            "z_hat": z_hat,
+        }
+
+    @torch.no_grad()
+    def decompress(
+        self,
+        *,
+        y_strings: Sequence[bytes],
+        z_strings: Sequence[bytes],
+        y_shape: Sequence[int],
+        z_shape: Sequence[int],
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Decode entropy strings without access to the source image."""
+
+        if self.training:
+            raise RuntimeError("Entropy decompression requires eval() mode")
+        if len(y_shape) != 3 or int(y_shape[0]) != self.latent_dim:
+            raise ValueError(
+                f"Invalid y shape {tuple(y_shape)} for latent_dim={self.latent_dim}"
+            )
+        if len(z_shape) != 3 or int(z_shape[0]) != self.hyper_dim:
+            raise ValueError(
+                f"Invalid z shape {tuple(z_shape)} for hyper_dim={self.hyper_dim}"
+            )
+        if len(y_strings) != len(z_strings) or not y_strings:
+            raise ValueError("y and z entropy stream counts must match and be non-empty")
+
+        self._require_rans()
+        self.update(force=False)
+        z_hat = self.entropy_bottleneck.decompress(
+            list(z_strings),
+            tuple(int(value) for value in z_shape[-2:]),
+        )
+        scales_hat, means_hat, gain_logits = self._split_hyper_params(
+            z_hat,
+            tuple(int(value) for value in y_shape[-2:]),
+        )
+        gain_map = self._make_gain_map(gain_logits)
+        indexes = self.gaussian_conditional.build_indexes(scales_hat)
+        y_hat_scaled = self.gaussian_conditional.decompress(
+            list(y_strings),
+            indexes,
+            means=means_hat,
+        )
+        y_hat = y_hat_scaled / gain_map.clamp(min=1e-6)
+
+        return y_hat, {
+            "gain_map": gain_map,
+            "means_hat": means_hat,
+            "scales_hat": scales_hat,
+            "z_hat": z_hat,
+        }

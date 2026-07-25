@@ -396,6 +396,8 @@ def run_ablation_study(
                         "seed": seed,
                         "epochs": epochs,
                         "batch_size": batch_size,
+                        "height": height,
+                        "width": width,
                         "architecture": asdict(config),
                         "device": device,
                         "manifest_paths": {

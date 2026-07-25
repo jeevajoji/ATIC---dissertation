@@ -1,0 +1,98 @@
+ATIC FILE FORMAT VERSION 1.0
+============================
+
+Byte order
+----------
+
+All multi-byte integers are unsigned and stored in network (big-endian) byte
+order. Version 1 stores exactly one RGB image per file.
+
+
+Physical layout
+---------------
+
+    bytes 0..127       fixed ATIC header
+    next z_length      CompressAI/rANS hyperlatent string
+    next y_length      CompressAI/rANS main-latent string
+    end of file        no trailing bytes permitted
+
+z precedes y because the decoder must reconstruct the Gaussian parameters and
+decoder-synchronised gain map from z_hat before y can be entropy-decoded.
+
+
+Header layout (128 bytes)
+-------------------------
+
+Offset  Size  Type       Field
+------  ----  ---------  -----------------------------------------------
+0       8     bytes      magic = 41 54 49 43 0D 0A 1A 0A
+8       2     uint16     major version = 1
+10      2     uint16     minor version = 0
+12      4     uint32     header size = 128
+16      4     uint32     architecture flags
+20      4     uint32     original image width
+24      4     uint32     original image height
+28      4     uint32     coded image width
+32      4     uint32     coded image height
+36      4     uint32     y latent width
+40      4     uint32     y latent height
+44      4     uint32     z latent width
+48      4     uint32     z latent height
+52      2     uint16     y latent channels
+54      1     uint8      bit depth (currently 8)
+55      1     uint8      colourspace (1 = RGB)
+56      1     uint8      entropy coder (1 = rANS)
+57      1     uint8      batch size (must be 1)
+58      2     uint16     quality/rate identifier (0 = unspecified)
+60      8     uint64     z payload length in bytes
+68      8     uint64     y payload length in bytes
+76      32    bytes      SHA-256 of the exact decoder checkpoint
+108     4     uint32     CRC-32 of z payload
+112     4     uint32     CRC-32 of y payload
+116     4     uint32     CRC-32 of header with this field zeroed
+120     8     bytes      reserved; must be all zero
+
+
+Architecture flags
+------------------
+
+Bit 0: overlapping patches enabled
+Bit 1: adaptive quantisation/gain enabled
+Bit 2: SAG enabled
+Bit 3: CBAM enabled
+All remaining bits are reserved in version 1.
+
+
+Validation rules
+----------------
+
+A decoder must reject the file before entropy decoding when:
+
+1. magic, version, or header size is unsupported;
+2. the header or either payload CRC fails;
+3. the declared lengths do not equal the exact file size;
+4. dimensions, channel count, or identifiers are invalid;
+5. reserved bytes are non-zero;
+6. architecture flags or coded resolution differ from the decoder; or
+7. y/z spatial shapes differ from the deterministic shapes implied by the
+   decoder architecture and coded resolution; or
+8. the embedded checkpoint SHA-256 differs from the installed checkpoint.
+
+Implementations in this repository cap a version-1 payload at 256 MiB and
+perform bounded file reads before allocating entropy-decoder tensors.
+
+
+Rate accounting
+---------------
+
+Headline actual BPP includes the header:
+
+    BPP_actual = 8 * complete_file_bytes
+                 / (original_width * original_height)
+
+Payload-only BPP may be reported diagnostically:
+
+    BPP_payload = 8 * (z_length + y_length)
+                  / (original_width * original_height)
+
+BPP_payload must not replace BPP_actual in headline rate-distortion results.

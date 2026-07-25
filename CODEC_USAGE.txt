@@ -1,0 +1,119 @@
+ATIC REAL BITSTREAM USAGE
+=========================
+
+Requirements
+------------
+
+The sender and receiver must have:
+
+1. the same ATIC source code;
+2. the exact same model.pth checkpoint; and
+3. the matching run_config.json containing the architecture configuration.
+
+The checkpoint SHA-256 is embedded in each .atic file. Decoding stops before
+entropy decoding if the receiver supplies a different checkpoint.
+
+
+Compress one image
+------------------
+
+python -m atic.codec_cli compress ^
+  --input image.png ^
+  --output image.atic ^
+  --checkpoint model.pth ^
+  --config run_config.json ^
+  --height 512 ^
+  --width 512 ^
+  --device cpu
+
+New run_config.json files record the trained height and width, so the two
+resolution arguments may then be omitted. Older run configs do not; for those,
+both arguments are required. ATIC checkpoints contain resolution-specific Swin
+buffers, so a checkpoint trained at 512x512 must not be loaded at another size.
+
+The command prints:
+
+- complete file bytes and actual BPP;
+- payload-only bytes and BPP;
+- separate y and z byte counts; and
+- the checkpoint hash.
+
+The headline BPP always includes the fixed 128-byte ATIC header.
+
+
+Inspect without loading PyTorch
+-------------------------------
+
+python -m atic.codec_cli inspect --input image.atic
+
+Inspection validates the header and both payload checksums. It reports image
+dimensions, latent shapes, file bytes, BPP, and checkpoint hash.
+
+
+Decompress
+----------
+
+python -m atic.codec_cli decompress ^
+  --input image.atic ^
+  --output reconstruction.png ^
+  --checkpoint model.pth ^
+  --config run_config.json ^
+  --height 512 ^
+  --width 512 ^
+  --device cpu
+
+The decoder receives no original image and no encoder attention map. It:
+
+1. reads and validates the .atic header;
+2. decodes z first;
+3. recreates Gaussian parameters and the gain map from z_hat;
+4. decodes y;
+5. runs the neural decoder and patch reconstructor; and
+6. writes the reconstructed RGB image.
+
+
+Python API
+----------
+
+model.eval()
+
+encoded = model.compress(image_tensor, output_path="image.atic")
+x_hat = model.decompress("image.atic")
+
+image_tensor must currently have shape (1, 3, H, W), where H and W match the
+resolution used to construct ATICModel. Version 1 stores one image per file.
+The Python API refuses entropy coding until load_checkpoint() or set_model_id()
+has bound an exact model identity.
+
+
+Portability boundary
+--------------------
+
+The CLI defaults to CPU, which is the tested sender/receiver path. Use the same
+ATIC commit, CompressAI version, PyTorch version, checkpoint, configuration,
+resolution, and execution backend at both ends. CUDA coding is useful for
+same-machine experiments but cross-GPU/CUDA-to-CPU entropy-index reproducibility
+has not yet been established; do not claim that boundary in a paper without a
+dedicated interoperability test.
+
+
+Evaluation
+----------
+
+eval_single(..., bitstream_dir="bitstreams") now writes real .atic files.
+
+Reported fields include:
+
+- BPP and BPP_actual: complete-file bitrate;
+- BPP_payload: z+y entropy payload bitrate;
+- BPP_estimated: likelihood estimate retained for calibration;
+- bitstream_bytes and payload_bytes; and
+- reconstruction metrics computed from decompressed images.
+
+The existing archived 36 experiments remain likelihood-only historical
+results. They must not be relabelled as actual-bitstream results.
+
+Their checkpoints were also trained while the old encoder-only SAG map was
+blended into adaptive gain. They can be used for codec smoke tests, but the
+decoder-synchronised model must be retrained before its rate-distortion numbers
+are compared with those archived experiments.

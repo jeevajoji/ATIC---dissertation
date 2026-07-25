@@ -5,9 +5,9 @@ Exact mirror of the encoder. Progressively upsamples the latent tensor
 back to the full token grid resolution for the patch reconstructor.
 
 Stage shapes (mirror of encoder):
-    Stage 1:  16×30,  1024ch  →  33×60,   512ch
-    Stage 2:  33×60,   512ch  →  67×120,  256ch
-    Stage 3:  67×120,  256ch  → 135×240,  128ch
+    Stage 1:  17×30,  1024ch  →  34×60,   512ch
+    Stage 2:  34×60,   512ch  →  68×120,  256ch
+    Stage 3:  68×120,  256ch  → 135×240,  128ch
     Stage 4: 135×240,  128ch  → 135×240,  128ch  (no upsampling)
 
 PatchExpanding2D is the inverse of PatchMerging2D:
@@ -217,12 +217,12 @@ class SwinDecoder(nn.Module):
             H, W = H_even // 2, W_even // 2
             spatial.append((H, W))
         spatial.reverse()
-        # spatial = [(16,30), (33,60), (67,120), (135,240)]
+        # spatial = [(17,30), (34,60), (68,120), (135,240)]
 
         # upsampled-to resolutions for each decoder stage
-        # stage 0: 16×30 → 33×60   (output_res = spatial[1])
-        # stage 1: 33×60 → 67×120  (output_res = spatial[2])
-        # stage 2: 67×120→135×240  (output_res = spatial[3])
+        # stage 0: 17×30 → 34×60   (output_res = spatial[1])
+        # stage 1: 34×60 → 68×120  (output_res = spatial[2])
+        # stage 2: 68×120→135×240  (output_res = spatial[3])
         # stage 3: 135×240→135×240 (no upsample)
         output_resolutions = [spatial[1], spatial[2], spatial[3], spatial[3]]
         out_dims           = [dims[2], dims[1], dims[0], dims[0]]
@@ -253,7 +253,7 @@ class SwinDecoder(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            latent : (B, 1024, 16, 30)   quantised latent from entropy decoder
+            latent : (B, 1024, 17, 30)   quantised latent from entropy decoder
             skips  : list of 4 encoder feature maps, ordered coarse→fine
                      [stage4_out, stage3_out, stage2_out, stage1_out]
                      Pass None if use_skip=False (default)

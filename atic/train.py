@@ -6,6 +6,7 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 
+from atic.bitstream import sha256_file
 from atic.losses import ATICLoss
 
 
@@ -484,6 +485,9 @@ def train_loop(
 
     # Keep this as state_dict for compatibility with your old code.
     torch.save(model.state_dict(), checkpoint_path)
+    if hasattr(model, "set_model_id"):
+        # Bind any subsequently produced .atic files to this exact checkpoint.
+        model.set_model_id(sha256_file(checkpoint_path))
 
     print(f"[{variant_name}] Saved checkpoint to {checkpoint_path}.")
 
