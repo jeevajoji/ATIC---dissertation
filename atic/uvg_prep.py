@@ -396,6 +396,7 @@ def _ffmpeg_command(
     return [
         ffmpeg,
         "-hide_banner",
+        "-nostdin",
         "-loglevel",
         "error",
         "-threads",

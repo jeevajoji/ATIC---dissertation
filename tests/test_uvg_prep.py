@@ -77,6 +77,7 @@ class UVGPreparationTests(unittest.TestCase):
             output_path,
         )
         self.assertIsInstance(command, list)
+        self.assertIn("-nostdin", command)
         self.assertIn(str(raw_path), command)
         self.assertIn(str(output_path), command)
         self.assertIn("select=eq(n\\,12)+eq(n\\,37)", command[command.index("-vf") + 1])
