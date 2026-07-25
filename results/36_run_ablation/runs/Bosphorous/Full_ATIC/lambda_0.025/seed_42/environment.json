@@ -1,0 +1,15 @@
+{
+  "cuda_available": true,
+  "cuda_version": "12.4",
+  "cudnn_version": 90100,
+  "git": {
+    "commit": "2edf8ac0f21fc8def33d56d7c5dfce227d67a43b",
+    "is_dirty": true
+  },
+  "gpu_name": "NVIDIA RTX A6000",
+  "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+  "python_version": "3.10.20",
+  "requested_device": "cuda",
+  "timestamp_utc": "2026-07-15T13:46:41.773491+00:00",
+  "torch_version": "2.6.0+cu124"
+}

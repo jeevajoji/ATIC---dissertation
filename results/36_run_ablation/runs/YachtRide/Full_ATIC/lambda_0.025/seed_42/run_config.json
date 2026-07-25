@@ -1,0 +1,36 @@
+{
+  "architecture": {
+    "depths": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "num_heads_enc": [
+      4,
+      8,
+      16,
+      32
+    ],
+    "patch_size": 16,
+    "swin_stages": 4,
+    "token_dim": 128,
+    "use_adaptive_quant": true,
+    "use_cbam": true,
+    "use_hyperprior": true,
+    "use_overlapping_patches": true,
+    "use_sag": true,
+    "window_size": 8
+  },
+  "batch_size": 4,
+  "device": "cuda",
+  "epochs": 20,
+  "lambda_rate": 0.025,
+  "manifest_paths": {
+    "test": "atic_clean_results/yachtride_gpu0_baseline_full_20260715_172242/manifests/test_manifest.txt",
+    "train": "atic_clean_results/yachtride_gpu0_baseline_full_20260715_172242/manifests/train_manifest.txt",
+    "val": "atic_clean_results/yachtride_gpu0_baseline_full_20260715_172242/manifests/val_manifest.txt"
+  },
+  "seed": 42,
+  "variant": "Full_ATIC"
+}

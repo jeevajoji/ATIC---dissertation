@@ -12,3 +12,7 @@ ablation_results/plots/
 Papers/
 Res prop/
 ablation_results/
+
+# Keep published result records lightweight and GitHub-compatible
+results/**/model.pth
+results/**/epoch_previews/

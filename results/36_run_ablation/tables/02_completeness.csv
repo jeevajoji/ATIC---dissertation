@@ -1,0 +1,13 @@
+Sequence,variant,points,distinct_lambdas,seeds,complete
+HoneyBee,Baseline,3,3,42,True
+HoneyBee,Full_ATIC,3,3,42,True
+HoneyBee,No_AdaptiveQuant,3,3,42,True
+HoneyBee,No_CBAM,3,3,42,True
+Bosphorous,Baseline,3,3,42,True
+Bosphorous,Full_ATIC,3,3,42,True
+Bosphorous,No_AdaptiveQuant,3,3,42,True
+Bosphorous,No_CBAM,3,3,42,True
+YachtRide,Baseline,3,3,42,True
+YachtRide,Full_ATIC,3,3,42,True
+YachtRide,No_AdaptiveQuant,3,3,42,True
+YachtRide,No_CBAM,3,3,42,True

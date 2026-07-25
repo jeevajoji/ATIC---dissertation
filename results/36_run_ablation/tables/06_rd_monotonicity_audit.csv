@@ -1,0 +1,13 @@
+Sequence,variant,PSNR_monotonic,SSIM_monotonic,MS-SSIM_monotonic,LPIPS_monotonic,DISTS_monotonic,MSE_monotonic,all_metrics_monotonic
+HoneyBee,Baseline,True,True,True,False,False,True,False
+HoneyBee,Full_ATIC,True,False,True,True,True,True,False
+HoneyBee,No_AdaptiveQuant,False,False,False,False,True,False,False
+HoneyBee,No_CBAM,True,True,True,True,True,True,True
+Bosphorous,Baseline,True,False,False,True,True,True,False
+Bosphorous,Full_ATIC,True,True,True,True,True,True,True
+Bosphorous,No_AdaptiveQuant,True,True,True,True,True,True,True
+Bosphorous,No_CBAM,True,True,True,True,True,True,True
+YachtRide,Baseline,False,False,False,False,False,False,False
+YachtRide,Full_ATIC,False,False,False,False,False,False,False
+YachtRide,No_AdaptiveQuant,True,True,True,False,False,True,False
+YachtRide,No_CBAM,False,False,False,False,False,False,False

@@ -1,0 +1,296 @@
+ATIC RESEARCH AND IMPLEMENTATION PHASE PLAN
+===========================================
+
+Primary research direction
+--------------------------
+
+Decoder-Synchronised Attention Distillation (DSAD), followed by the more
+ambitious Value-of-a-Bit / Marginal-Utility allocation extension.
+
+The final codec must be valid: the decoder may use only the compressed file,
+the installed decoder weights, and metadata stored in the file. It must never
+need the original image or private encoder features.
+
+
+PHASE 1 - ESTABLISH A TRUSTWORTHY BASELINE
+------------------------------------------
+
+Actions:
+
+1. Freeze the current code and results in version control.
+2. Select one clean baseline containing the encoder, hyperprior, entropy
+   model, and decoder.
+3. Remove or isolate inactive components from the experimental path.
+4. Create leakage-free training, validation, and independent test splits.
+5. Train at least six rate points instead of only three.
+
+Reason:
+
+This makes it possible to prove that an improvement is caused by the new
+method instead of data leakage, configuration differences, or broken rate
+control.
+
+Exit condition:
+
+The baseline is reproducible and produces monotonic rate-distortion curves on
+an independent test set.
+
+
+PHASE 2 - BUILD A REAL CODEC
+----------------------------
+
+Required interface:
+
+    compressed_file = model.compress(image)
+    reconstructed_image = model.decompress(compressed_file)
+
+The compressed ATIC file should contain:
+
+    Header
+    z_bytes
+    y_bytes
+
+Encoding order:
+
+    image -> y -> z -> quantise z -> entropy-code z_bytes
+                              |
+                              +-> hyperdecoder -> parameters for y
+                                                   |
+                              quantise and entropy-code y_bytes
+
+Decoding order:
+
+    z_bytes -> z_hat -> hyperdecoder
+                           |
+                           +-> decode y_bytes -> y_hat
+                                                   |
+                                                   +-> decoder -> image
+
+Use an actual entropy coder, such as rANS through CompressAI, instead of
+storing tensors in NPZ files.
+
+Actual bitrate:
+
+    actual_bpp = (8 * compressed_file_size_bytes) / (width * height)
+
+Required tests:
+
+1. decompress(compress(image)) works in a fresh process.
+2. The decoder never accesses the original image.
+3. The reconstructed image matches the evaluation forward pass.
+4. Estimated BPP is close to actual BPP.
+5. Different image dimensions decode correctly.
+6. A saved file still decodes after restarting the program.
+
+Exit condition:
+
+One .atic file can be transferred to a different computer that has the
+matching decoder, and that computer can reconstruct the image.
+
+
+PHASE 3 - ADD A DECODER-SYNCHRONISED GAIN MAP
+----------------------------------------------
+
+Add a small student gain head to the hyperdecoder:
+
+    z_hat
+       |
+    hyperdecoder features
+       +-> probability parameters: mean and scale
+       +-> student gain head -> spatial gain map
+
+The gain map may depend only on:
+
+1. z_hat;
+2. installed decoder weights; and
+3. settings stored in the compressed-file header.
+
+It must not depend on the original image, unavailable encoder features, or
+values of y that have not yet been decoded.
+
+Both encoder and decoder must execute the same operation:
+
+    student_map = gain_head(hyperdecoder(z_hat))
+
+Possible gain formulation:
+
+    k = round(y * g)
+    y_hat = k / g
+
+where g > 1 gives finer quantisation and g < 1 gives coarser quantisation.
+The entropy-model parameters must be transformed consistently:
+
+    mean_k = mean_y * g
+    scale_k = scale_y * g
+
+Important invariant:
+
+The deployable encoder and decoder both use the student map. The encoder-only
+teacher map is never used to construct a final bitstream.
+
+Exit condition:
+
+Hashes or exact comparisons prove that the encoder and decoder generate the
+same gain map from the same decoded z_hat.
+
+
+PHASE 4 - INTRODUCE THE TRAINING-ONLY TEACHER
+----------------------------------------------
+
+The existing encoder attention/SAG component becomes the teacher:
+
+    encoder features -> teacher attention map
+    z_hat            -> student attention map
+
+Initial objective:
+
+    total_loss = R_y + R_z + lambda * distortion
+                 + beta * distillation_loss
+
+Initial distillation loss:
+
+    distillation_loss =
+        L1(student_map, stop_gradient(teacher_map))
+
+Training sequence:
+
+1. Train the ordinary codec.
+2. Train or stabilise the encoder-side teacher.
+3. Freeze or detach the teacher.
+4. Train the student to reproduce the teacher map.
+5. Fine-tune the complete codec while using the student map.
+6. Remove the teacher from compress() and decompress().
+
+The teacher is training equipment only. It is not included in the compressed
+file and is not required by the receiver.
+
+Exit condition:
+
+The student predicts the teacher map accurately enough to improve real
+rate-distortion performance, not merely map-similarity loss.
+
+
+PHASE 5 - PREVENT THE GAIN MAP FROM CHEATING
+---------------------------------------------
+
+Use a bounded positive gain, for example:
+
+    log_g = a * tanh(student_output)
+
+Normalise its geometric mean so that it mainly reallocates bits spatially:
+
+    g_normalised = g / exp(mean(log(g)))
+
+Record:
+
+1. total BPP;
+2. y BPP;
+3. z BPP;
+4. average, minimum, and maximum gain;
+5. teacher-student map similarity; and
+6. actual-versus-estimated BPP error.
+
+Reason:
+
+The gain map must move a limited bit budget from low-value regions to
+high-value regions. It must not appear successful merely by increasing every
+gain value or hiding an expensive map inside z.
+
+
+PHASE 6 - RUN THE ESSENTIAL ABLATIONS
+--------------------------------------
+
+Train all versions with identical data, seeds, lambda values, epochs, and
+evaluation settings:
+
+1. Plain hyperprior baseline.
+2. Student gain without teacher distillation.
+3. Student gain with distillation (proposed DSAD).
+4. Explicitly transmitted attention map.
+5. Teacher/oracle map as a non-deployable upper bound.
+6. Uniform-gain control.
+
+Required conclusion:
+
+DSAD succeeds only if it beats both the plain hyperprior and the
+student-without-distillation model after counting every y bit, z bit, header
+bit, and any explicit side-information bit.
+
+
+PHASE 7 - PUBLICATION-QUALITY EVALUATION
+-----------------------------------------
+
+Datasets:
+
+1. Kodak.
+2. Tecnick.
+3. CLIC validation/test data where permitted.
+4. HoneyBee or another independent, texture-heavy dataset.
+
+Report:
+
+1. Actual BPP from the compressed file.
+2. PSNR and BD-rate.
+3. MS-SSIM.
+4. LPIPS or DISTS.
+5. Edge and fine-texture preservation.
+6. Encoding and decoding time.
+7. Parameter count.
+8. z bitrate as a percentage of total bitrate.
+9. At least three random seeds.
+
+Use at least six rate points and matched actual bitrates for every comparison.
+
+Initial paper-success target:
+
+1. A consistent rate-distortion improvement over the identical backbone; or
+2. significantly better texture/perceptual quality at matched actual BPP;
+3. no separately transmitted attention map;
+4. small runtime overhead; and
+5. an ablation proving that distillation caused the improvement.
+
+A consistent 2-5 percent BD-rate improvement over a strong, identical
+backbone would be meaningful if supported by rigorous experiments. Global
+SOTA is not required for the first paper claim.
+
+
+PHASE 8 - VALUE-OF-A-BIT / MARGINAL-UTILITY EXTENSION
+------------------------------------------------------
+
+Only begin this phase after the basic DSAD codec works.
+
+For each latent region:
+
+1. Reconstruct it using ordinary quantisation.
+2. Give only that region slightly finer quantisation.
+3. Measure the additional bits.
+4. Measure the quality improvement.
+5. Calculate its marginal utility:
+
+       utility_i = quality_improvement_i / additional_bits_i
+
+The encoder-side teacher estimates these utilities during training. The
+student predicts them using only z_hat. A differentiable allocator then gives
+the limited bit budget to the regions with the greatest predicted utility.
+
+Ambitious contribution:
+
+    Decoder-synchronised allocation based on the predicted marginal value of
+    each additional bit.
+
+
+IMMEDIATE IMPLEMENTATION ORDER
+-------------------------------
+
+1. Identify the exact encoder, hyperprior, entropy-model, and decoder files.
+2. Trace and document the current forward pass.
+3. Determine whether the current entropy modules support real rANS coding.
+4. Specify a versioned .atic container format.
+5. Implement compress() and decompress().
+6. Verify real-file round trips and actual BPP.
+7. Add the hyperdecoder student gain head.
+8. Add the training-only teacher and distillation loss.
+9. Run the controlled ablations.
+10. Attempt the Value-of-a-Bit extension only after DSAD passes its exit
+    conditions.
+
