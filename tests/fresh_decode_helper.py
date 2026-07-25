@@ -24,6 +24,22 @@ def small_config():
     )
 
 
+def entropy_buffer_snapshot(model):
+    suffixes = (
+        "_quantized_cdf",
+        "_offset",
+        "_cdf_length",
+        "scale_table",
+        "scale_bound",
+    )
+    return {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in model.state_dict().items()
+        if name.startswith("entropy.")
+        and name.endswith(suffixes)
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
@@ -33,11 +49,29 @@ def main():
     parser.add_argument("--width", type=int, required=True)
     args = parser.parse_args()
 
+    torch.set_num_threads(1)
     model = ATICModel(small_config(), H=args.height, W=args.width)
     model.load_checkpoint(args.checkpoint, map_location="cpu")
     model.eval()
-    reconstructed = model.decompress(args.bitstream)
-    torch.save(reconstructed, args.output)
+    entropy_buffers_before_decode = entropy_buffer_snapshot(model)
+    with torch.no_grad():
+        decoded = model.decompress(
+            args.bitstream,
+            return_info=True,
+            return_diagnostics=True,
+        )
+    torch.save(
+        {
+            "x_hat": decoded["x_hat"].cpu(),
+            "entropy_diagnostics": {
+                name: tensor.cpu()
+                for name, tensor in decoded["entropy_diagnostics"].items()
+            },
+            "entropy_buffers_before_decode": entropy_buffers_before_decode,
+            "entropy_buffers_after_decode": entropy_buffer_snapshot(model),
+        },
+        args.output,
+    )
 
 
 if __name__ == "__main__":

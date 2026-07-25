@@ -49,6 +49,8 @@ def small_config():
     f"PyTorch/CompressAI codec stack unavailable: {CODEC_IMPORT_ERROR}",
 )
 class ATICCodecRoundTripTests(unittest.TestCase):
+    PIXEL_ATOL = 1e-6
+
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(1)
@@ -65,15 +67,68 @@ class ATICCodecRoundTripTests(unittest.TestCase):
         model.update(force=True)
         return model
 
+    def assert_entropy_diagnostics_equal(self, sender, receiver):
+        for name in ("z_symbols", "y_symbols", "indexes"):
+            sender_tensor = sender[name].detach().cpu()
+            receiver_tensor = receiver[name].detach().cpu()
+            self.assertEqual(sender_tensor.dtype, torch.int32)
+            self.assertEqual(receiver_tensor.dtype, sender_tensor.dtype)
+            self.assertEqual(
+                tuple(receiver_tensor.shape),
+                tuple(sender_tensor.shape),
+            )
+            self.assertTrue(
+                torch.equal(sender_tensor, receiver_tensor),
+                msg=f"Entropy diagnostic mismatch: {name}",
+            )
+
+    def assert_reconstruction_close(self, expected, actual):
+        self.assertEqual(tuple(expected.shape), tuple(actual.shape))
+        self.assertTrue(torch.isfinite(expected).all())
+        self.assertTrue(torch.isfinite(actual).all())
+        self.assertGreaterEqual(float(actual.min()), 0.0)
+        self.assertLessEqual(float(actual.max()), 1.0)
+        torch.testing.assert_close(
+            expected,
+            actual,
+            rtol=0,
+            atol=self.PIXEL_ATOL,
+        )
+
+    @staticmethod
+    def entropy_buffer_snapshot(model):
+        suffixes = (
+            "_quantized_cdf",
+            "_offset",
+            "_cdf_length",
+            "scale_table",
+            "scale_bound",
+        )
+        return {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in model.state_dict().items()
+            if name.startswith("entropy.")
+            and name.endswith(suffixes)
+        }
+
     def test_real_entropy_round_trip_matches_eval_forward(self):
         model = self.make_model()
         source = torch.rand(1, 3, 64, 64)
 
-        expected = model(source)["x_hat"]
-        encoded = model.compress(source)
-        actual = model.decompress(encoded["bitstream"])
+        with torch.no_grad():
+            expected = model(source)["x_hat"]
+            encoded = model.compress(source, return_diagnostics=True)
+            decoded = model.decompress(
+                encoded["bitstream"],
+                return_info=True,
+                return_diagnostics=True,
+            )
 
-        self.assertTrue(torch.equal(expected, actual))
+        self.assert_entropy_diagnostics_equal(
+            encoded["entropy_diagnostics"],
+            decoded["entropy_diagnostics"],
+        )
+        self.assert_reconstruction_close(expected, decoded["x_hat"])
         self.assertEqual(encoded["num_bytes"], len(encoded["bitstream"]))
         self.assertEqual(
             encoded["bpp"],
@@ -162,13 +217,23 @@ class ATICCodecRoundTripTests(unittest.TestCase):
     def test_odd_latent_dimensions_round_trip(self):
         model = self.make_model(height=72, width=88)
         source = torch.rand(1, 3, 72, 88)
-        expected = model(source)["x_hat"]
-        encoded = model.compress(source)
-        reconstructed = model.decompress(encoded["bitstream"])
+        with torch.no_grad():
+            expected = model(source)["x_hat"]
+            encoded = model.compress(source, return_diagnostics=True)
+            decoded = model.decompress(
+                encoded["bitstream"],
+                return_info=True,
+                return_diagnostics=True,
+            )
+        reconstructed = decoded["x_hat"]
         container = unpack_atic(encoded["bitstream"])
 
         self.assertEqual(tuple(reconstructed.shape), (1, 3, 72, 88))
-        self.assertTrue(torch.equal(expected, reconstructed))
+        self.assert_entropy_diagnostics_equal(
+            encoded["entropy_diagnostics"],
+            decoded["entropy_diagnostics"],
+        )
+        self.assert_reconstruction_close(expected, reconstructed)
         self.assertEqual(
             (container.original_height, container.original_width),
             (72, 88),
@@ -220,8 +285,17 @@ class ATICCodecRoundTripTests(unittest.TestCase):
             # resizing when a fresh ATICModel loads the checkpoint.
             torch.save(model.state_dict(), checkpoint)
             model.set_model_id(sha256_file(checkpoint))
-            model.compress(source, output_path=bitstream)
-            expected = model.decompress(bitstream)
+            with torch.no_grad():
+                encoded = model.compress(
+                    source,
+                    output_path=bitstream,
+                    return_diagnostics=True,
+                )
+                expected = model.decompress(
+                    bitstream,
+                    return_info=True,
+                    return_diagnostics=True,
+                )
 
             command = [
                 sys.executable,
@@ -258,7 +332,45 @@ class ATICCodecRoundTripTests(unittest.TestCase):
                 )
             except TypeError:
                 actual = torch.load(subprocess_output, map_location="cpu")
-            self.assertTrue(torch.equal(expected.cpu(), actual))
+            self.assert_entropy_diagnostics_equal(
+                encoded["entropy_diagnostics"],
+                expected["entropy_diagnostics"],
+            )
+            self.assert_entropy_diagnostics_equal(
+                encoded["entropy_diagnostics"],
+                actual["entropy_diagnostics"],
+            )
+            self.assert_reconstruction_close(
+                expected["x_hat"].cpu(),
+                actual["x_hat"],
+            )
+
+            expected_buffers = self.entropy_buffer_snapshot(model)
+            for phase in ("before_decode", "after_decode"):
+                actual_buffers = actual[f"entropy_buffers_{phase}"]
+                self.assertEqual(
+                    set(expected_buffers),
+                    set(actual_buffers),
+                )
+                for name, tensor in expected_buffers.items():
+                    actual_tensor = actual_buffers[name]
+                    self.assertEqual(
+                        tensor.dtype,
+                        actual_tensor.dtype,
+                        msg=f"Loaded entropy buffer dtype mismatch: {name}",
+                    )
+                    self.assertEqual(
+                        tuple(tensor.shape),
+                        tuple(actual_tensor.shape),
+                        msg=f"Loaded entropy buffer shape mismatch: {name}",
+                    )
+                    self.assertTrue(
+                        torch.equal(tensor, actual_tensor),
+                        msg=(
+                            "Loaded entropy buffer mismatch "
+                            f"{phase}: {name}"
+                        ),
+                    )
 
     def test_cli_png_to_atic_to_png_in_separate_processes(self):
         model = self.make_model()

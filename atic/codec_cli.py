@@ -34,6 +34,14 @@ _MAX_CODED_DIMENSION = 16_384
 _MAX_CODED_PIXELS = 8_192 * 8_192
 
 
+def _configure_reference_runtime() -> None:
+    """Select the CPU threading profile exercised by codec portability tests."""
+
+    import torch
+
+    torch.set_num_threads(1)
+
+
 def _load_run_spec(
     path: str,
     *,
@@ -156,6 +164,7 @@ def _print_json(payload) -> None:
 
 
 def command_compress(args) -> None:
+    _configure_reference_runtime()
     config, height, width = _load_run_spec(
         args.config,
         height_override=args.height,
@@ -190,6 +199,7 @@ def command_compress(args) -> None:
 
 
 def command_decompress(args) -> None:
+    _configure_reference_runtime()
     config, height, width = _load_run_spec(
         args.config,
         height_override=args.height,

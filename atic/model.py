@@ -295,6 +295,7 @@ class ATICModel(CompressionModel):
         output_path: Optional[Union[str, os.PathLike[str]]] = None,
         *,
         quality_id: int = 0,
+        return_diagnostics: bool = False,
     ) -> Dict[str, object]:
         """Encode one image to a real, transferable ``.atic`` byte container."""
 
@@ -307,7 +308,10 @@ class ATICModel(CompressionModel):
         self.update(force=False)
         tokens = self.tokenizer(x)
         latent_y, _ = self.encoder(tokens)
-        entropy_output = self.entropy.compress(latent_y)
+        entropy_output = self.entropy.compress(
+            latent_y,
+            return_diagnostics=return_diagnostics,
+        )
 
         y_strings = entropy_output["y_strings"]
         z_strings = entropy_output["z_strings"]
@@ -337,7 +341,7 @@ class ATICModel(CompressionModel):
 
         num_bytes = len(bitstream)
         payload_bytes = len(z_strings[0]) + len(y_strings[0])
-        return {
+        result = {
             "bitstream": bitstream,
             "path": str(Path(output_path)) if output_path is not None else None,
             "num_bytes": num_bytes,
@@ -353,6 +357,9 @@ class ATICModel(CompressionModel):
             "z_bytes": len(z_strings[0]),
             "model_hash": self.model_hash_hex,
         }
+        if return_diagnostics:
+            result["entropy_diagnostics"] = entropy_output["diagnostics"]
+        return result
 
     @staticmethod
     def _read_container(source):
@@ -409,9 +416,22 @@ class ATICModel(CompressionModel):
             )
 
     @torch.no_grad()
-    def decompress(self, source, *, return_info: bool = False):
-        """Decode a ``.atic`` file using no information from the source image."""
+    def decompress(
+        self,
+        source,
+        *,
+        return_info: bool = False,
+        return_diagnostics: bool = False,
+    ):
+        """Decode a ``.atic`` file using no information from the source image.
 
+        Requesting entropy diagnostics implies the structured ``return_info``
+        result because the diagnostics cannot be represented by the default
+        reconstruction-only tensor return.
+        """
+
+        if return_diagnostics:
+            return_info = True
         self._require_model_hash()
         if self.training:
             raise RuntimeError("Call model.eval() before model.decompress()")
@@ -432,6 +452,7 @@ class ATICModel(CompressionModel):
                 container.z_height,
                 container.z_width,
             ),
+            return_diagnostics=return_diagnostics,
         )
         decoded_tokens = self.decoder(y_hat)
         x_hat = torch.sigmoid(self.reconstructor(decoded_tokens))
@@ -446,7 +467,7 @@ class ATICModel(CompressionModel):
             return x_hat
 
         payload_bytes = len(container.z_string) + len(container.y_string)
-        return {
+        result = {
             "x_hat": x_hat,
             "num_bytes": container.num_bytes,
             "payload_bytes": payload_bytes,
@@ -467,3 +488,6 @@ class ATICModel(CompressionModel):
             "gain_map": entropy_aux["gain_map"],
             "z_hat": entropy_aux["z_hat"],
         }
+        if return_diagnostics:
+            result["entropy_diagnostics"] = entropy_aux["diagnostics"]
+        return result

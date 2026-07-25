@@ -111,7 +111,10 @@ def eval_single(
         os.makedirs(bitstream_dir, exist_ok=True)
 
     if hasattr(model, "update"):
-        model.update(force=True)
+        # Training force-refreshes the tables before saving the final
+        # checkpoint. Preserve those exact tables here so streams remain
+        # decodable by a fresh receiver; empty legacy tables are still built.
+        model.update(force=False)
 
     metric_calculator = ATICMetrics(device=device)
     totals = {

@@ -240,8 +240,24 @@ class CompressAIHyperpriorEntropy(nn.Module):
                 "ATIC version 1 requires CompressAI's rANS entropy backend"
             )
 
+    def _z_symbols(self, z_value: torch.Tensor) -> torch.Tensor:
+        """Return the integer hyperlatent symbols used by EntropyBottleneck."""
+
+        medians = self.entropy_bottleneck._get_medians().detach().unsqueeze(0)
+        medians = medians.expand_as(z_value)
+        return self.entropy_bottleneck.quantize(
+            z_value,
+            "symbols",
+            medians,
+        )
+
     @torch.no_grad()
-    def compress(self, y: torch.Tensor) -> Dict[str, object]:
+    def compress(
+        self,
+        y: torch.Tensor,
+        *,
+        return_diagnostics: bool = False,
+    ) -> Dict[str, object]:
         """Entropy-code ``y`` and its hyperlatent using decoder-safe context."""
 
         if y.ndim != 4 or y.size(1) != self.latent_dim:
@@ -274,7 +290,7 @@ class CompressAIHyperpriorEntropy(nn.Module):
             means=means_hat,
         )
 
-        return {
+        result = {
             "y_strings": y_strings,
             "z_strings": z_strings,
             "y_shape": tuple(int(value) for value in y.shape[1:]),
@@ -282,6 +298,17 @@ class CompressAIHyperpriorEntropy(nn.Module):
             "gain_map": gain_map,
             "z_hat": z_hat,
         }
+        if return_diagnostics:
+            result["diagnostics"] = {
+                "z_symbols": self._z_symbols(z),
+                "y_symbols": self.gaussian_conditional.quantize(
+                    y_scaled,
+                    "symbols",
+                    means_hat,
+                ),
+                "indexes": indexes,
+            }
+        return result
 
     @torch.no_grad()
     def decompress(
@@ -291,7 +318,8 @@ class CompressAIHyperpriorEntropy(nn.Module):
         z_strings: Sequence[bytes],
         y_shape: Sequence[int],
         z_shape: Sequence[int],
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        return_diagnostics: bool = False,
+    ) -> Tuple[torch.Tensor, Dict[str, object]]:
         """Decode entropy strings without access to the source image."""
 
         if self.training:
@@ -326,9 +354,20 @@ class CompressAIHyperpriorEntropy(nn.Module):
         )
         y_hat = y_hat_scaled / gain_map.clamp(min=1e-6)
 
-        return y_hat, {
+        aux = {
             "gain_map": gain_map,
             "means_hat": means_hat,
             "scales_hat": scales_hat,
             "z_hat": z_hat,
         }
+        if return_diagnostics:
+            aux["diagnostics"] = {
+                "z_symbols": self._z_symbols(z_hat),
+                "y_symbols": self.gaussian_conditional.quantize(
+                    y_hat_scaled,
+                    "symbols",
+                    means_hat,
+                ),
+                "indexes": indexes,
+            }
+        return y_hat, aux

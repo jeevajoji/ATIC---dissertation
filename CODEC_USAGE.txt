@@ -91,10 +91,18 @@ Portability boundary
 
 The CLI defaults to CPU, which is the tested sender/receiver path. Use the same
 ATIC commit, CompressAI version, PyTorch version, checkpoint, configuration,
-resolution, and execution backend at both ends. CUDA coding is useful for
-same-machine experiments but cross-GPU/CUDA-to-CPU entropy-index reproducibility
-has not yet been established; do not claim that boundary in a paper without a
-dedicated interoperability test.
+resolution, and execution backend at both ends. The CLI fixes PyTorch's
+intra-operation thread count to one, matching the fresh-process portability
+test. CUDA coding is useful for same-machine experiments but
+cross-GPU/CUDA-to-CPU entropy-index reproducibility has not yet been established;
+do not claim that boundary in a paper without a dedicated interoperability test.
+
+Stream correctness is defined at the entropy boundary: decoded z symbols,
+Gaussian CDF indexes, and decoded y symbols must match exactly. The final
+neural reconstruction is floating-point computation; PyTorch CPU builds may
+differ by a few last-bit rounding units even when those entropy values are
+bit-identical. Tests therefore require exact entropy diagnostics and a fixed
+absolute pixel tolerance of 1e-6 on normalized [0,1] reconstructions.
 
 
 Evaluation
