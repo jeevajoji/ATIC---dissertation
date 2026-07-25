@@ -183,6 +183,22 @@ class FrozenSequenceSplitTests(unittest.TestCase):
             tuple(loaders.train.dataset.image_paths),
             bundle.splits["train"].image_paths,
         )
+        self.assertEqual(
+            loaders.train.sampler.__class__.__name__,
+            "RandomSampler",
+        )
+        self.assertEqual(
+            loaders.val.sampler.__class__.__name__,
+            "SequentialSampler",
+        )
+        self.assertEqual(
+            loaders.test.sampler.__class__.__name__,
+            "SequentialSampler",
+        )
+        first_order = list(iter(loaders.train.sampler))
+        loaders.train.generator.manual_seed(42)
+        repeated_order = list(iter(loaders.train.sampler))
+        self.assertEqual(first_order, repeated_order)
 
 
 if __name__ == "__main__":

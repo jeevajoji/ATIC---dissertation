@@ -602,6 +602,7 @@ def _make_loader(
     num_workers: int,
     pin_memory: bool,
     seed: int,
+    shuffle: bool,
 ) -> object:
     from torch.utils.data import DataLoader
 
@@ -610,7 +611,7 @@ def _make_loader(
     return DataLoader(
         UVGVideoDataset(list(image_paths)),
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
         generator=make_torch_generator(seed),
@@ -634,6 +635,7 @@ def get_frozen_split_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             seed=seed,
+            shuffle=True,
         ),
         val=_make_loader(
             bundle.splits["val"].image_paths,
@@ -641,6 +643,7 @@ def get_frozen_split_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             seed=seed + 1,
+            shuffle=False,
         ),
         test=_make_loader(
             bundle.splits["test"].image_paths,
@@ -648,5 +651,6 @@ def get_frozen_split_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             seed=seed + 2,
+            shuffle=False,
         ),
     )

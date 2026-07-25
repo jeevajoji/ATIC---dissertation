@@ -1,0 +1,64 @@
+ATIC causal-DSAD screening dataset
+==================================
+
+Purpose
+-------
+This is a small, sequence-disjoint internal screen for deciding whether DSAD
+has enough signal to justify paper-scale experiments. It is not itself a
+publication benchmark or a SOTA experiment.
+
+Frozen split
+------------
+Train:      Bosphorus, HoneyBee, YachtRide
+Validation: ShakeNDry
+Test:       Beauty (locked)
+
+Bosphorus, HoneyBee and YachtRide have already influenced development.
+ShakeNDry is used for every DSAD decision. Beauty must not be previewed,
+evaluated, or used for model, beta, epoch, lambda, or checkpoint selection.
+
+Preparation
+-----------
+Run from the repository root on CSML01:
+
+  python -m atic.uvg_prep \
+    --source-root "$HOME/datasets" \
+    --accept-uvg-by-nc
+
+The command:
+
+1. Reuses the existing UVG_bosphorous, UVG_Honeybee and UVG_yachtride sources.
+   Duplicate aliases such as 00001.png and frame_00001.png are verified by
+   decoded pixels and collapsed to their single source-frame index.
+2. Downloads the official 1920x1080 8-bit Beauty and ShakeNDry archives.
+3. Verifies exact raw frame counts and byte sizes.
+4. Samples fixed zero-based frames 12 + 25*k.
+5. Writes five non-overlapping 512x512 RGB crops per selected frame.
+6. Creates and verifies immutable train/validation/test manifests.
+
+Expected counts are 360 train crops, 60 validation crops and 120 locked test
+crops. The generated paths are:
+
+  $HOME/datasets/UVG_DSAD_screen_v1/dataset_512
+  $HOME/datasets/UVG_DSAD_screen_v1/frozen_split
+
+UVG is distributed under Creative Commons BY-NC for non-commercial use:
+https://creativecommons.org/licenses/by-nc/3.0/
+
+Screening rule
+--------------
+Run matched NoDSAD/DSAD experiments on validation only. Advance only when the
+validation BD-rate is consistently favourable across three paired seeds and
+the gain is materially larger than pilot noise. Do not pass --evaluate-test
+until all choices and the analysis plan are frozen.
+
+Scientific boundary
+-------------------
+These crops come from only five sequences in the same UVG capture family.
+They are temporally correlated and cannot support a broad generalisation or
+SOTA claim. Paper evidence still needs a large independent image-training
+corpus, full-resolution Kodak/Tecnick/CLIC evaluation, six RD points, at
+least three paired seeds, confidence intervals, actual bitstreams and ideally
+a second backbone. The colour-conversion provenance of the three existing PNG
+sources is also unknown; final paper work should regenerate all sources from
+official raw YUV through one recorded conversion pipeline.
