@@ -15,24 +15,32 @@ need the original image or private encoder features.
 CURRENT EXECUTION GATE
 ----------------------
 
-The two-epoch, one-lambda, one-seed integration pilot for the identical
-Full_ATIC_NoDSAD and Full_ATIC_DSAD architectures is complete. It passed
-gradient, schedule, logging, checkpoint, real-bitstream, and metric-accounting
-checks. At 0.479 BPP, the paired DSAD arm changed actual BPP by -0.000183 and
-PSNR by +0.000060 dB. These approximately six bytes per 512x512 image are
-directionally favourable but scientifically negligible; they are recorded
-only as evidence that the mechanism is connected correctly.
+The DSAD wiring pilot, frozen sequence-disjoint UVG bundle, beta calibration,
+and three-seed beta=8 confirmation are complete. The independent Beauty test
+sequence remains locked. At lambda_rd=0.0067, DSAD improved validation PSNR
+and LPIPS in all three confirmation seeds, but increased actual BPP in all
+three. These single-rate results therefore do not prove better compression.
 
-Do not begin long training or report rate-distortion conclusions until the
-training, validation, and independent test manifests are leakage-free,
-inspected, and frozen. Validation data may select checkpoints and
-hyperparameters; the independent test set must not influence those choices.
+The four-rate extension exposed a more fundamental blocker: both the
+Full_ATIC_NoDSAD control and DSAD curves were non-monotonic for all three
+seeds, so zero of three seeds produced a valid PSNR BD-rate curve. Because
+the matched control also failed, this is a baseline training/rate-control
+failure rather than evidence for or against DSAD.
 
-The next hard gate is a versioned frozen split bundle with sequence-disjoint
-train, validation, and test manifests. Test evaluation remains locked during
-model and hyperparameter selection. After this gate, run a three-seed
-screening study and advance only if validation BD-rate improves consistently;
-otherwise strengthen the teacher target before spending more GPU time.
+Do not unlock Beauty, calculate publication BD-rate, tune DSAD further, or
+claim compression novelty until the identical-backbone control produces a
+monotonic validation RD curve. The current baseline-rescue protocol uses:
+
+1. deterministic cosine learning-rate decay;
+2. a substantially longer training budget;
+3. validation-RD checkpoint selection instead of the final epoch;
+4. checkpoint eligibility only after the DSAD warm-up/ramp in paired runs;
+5. a control-only four-rate, one-seed monotonicity gate.
+
+If that control gate still fails, isolate adaptive gain by comparing
+No_AdaptiveQuant against Full_ATIC_NoDSAD, then replace the small-batch
+BatchNorm layers in SAG with a batch-independent normalisation in a separately
+labelled architecture ablation. Only one cause is changed at a time.
 
 The causal DSAD comparison changes only beta_max:
 

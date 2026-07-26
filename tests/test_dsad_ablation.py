@@ -86,6 +86,8 @@ class DSADAblationConfigurationTests(unittest.TestCase):
         self.assertEqual(args.dsad_beta_max, 0.05)
         self.assertEqual(args.dsad_warmup_fraction, 0.20)
         self.assertEqual(args.dsad_ramp_fraction, 0.10)
+        self.assertEqual(args.lr_schedule, "cosine")
+        self.assertEqual(args.checkpoint_selection, "best_val_rd")
         self.assertIsNone(args.dataset_root)
         self.assertIsNone(args.frozen_split_dir)
         self.assertFalse(args.evaluate_test)

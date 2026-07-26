@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     import torch
@@ -266,6 +267,89 @@ class DSADScheduleTests(unittest.TestCase):
 
             logged = json.loads(log_path.read_text(encoding="utf-8"))
             self.assertEqual(logged, record)
+
+    def test_cosine_schedule_restores_best_validation_rd_checkpoint(self):
+        class TinyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.value = torch.nn.Parameter(torch.tensor(0.2))
+
+            def forward(self, batch):
+                return {
+                    "x_hat": self.value * torch.ones_like(batch),
+                    "likelihoods": {
+                        "y": batch.new_full((1, 1, 1, 1), 0.5),
+                        "z": batch.new_full((1, 1, 1, 1), 0.5),
+                    },
+                }
+
+        observed_values = []
+
+        def validation_result(*, model, **_kwargs):
+            observed_values.append(float(model.value.detach()))
+            score = 1.0 if len(observed_values) == 1 else 2.0
+            result = {
+                f"val_{key}": 0.0
+                for key in LOSS_LOG_KEYS
+            }
+            result.update(
+                {
+                    "val_loss": score,
+                    "val_rd_loss": score,
+                    "val_total_bpp": 0.1,
+                    "val_mse_loss": 0.01,
+                    "val_dsad_loss": 0.0,
+                }
+            )
+            return result
+
+        batch = torch.zeros(1, 3, 2, 2)
+        model = TinyModel()
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
+            "atic.train.validate_loop",
+            side_effect=validation_result,
+        ):
+            temp_path = Path(temp_dir)
+            result = train_loop(
+                model,
+                "tiny_best",
+                [batch],
+                val_loader=[batch],
+                epochs=2,
+                device="cpu",
+                lambda_rd=0.01,
+                learning_rate=0.1,
+                aux_learning_rate=0.01,
+                lr_schedule="cosine",
+                min_learning_rate=0.01,
+                min_aux_learning_rate=0.001,
+                checkpoint_selection="best_val_rd",
+                checkpoint_selection_start_epoch=1,
+                checkpoint_path=str(temp_path / "model.pth"),
+                save_reconstruction_each_epoch=False,
+            )
+
+            self.assertEqual(result["selected_epoch"], 1)
+            self.assertAlmostEqual(result["selected_val_rd_loss"], 1.0)
+            self.assertAlmostEqual(
+                float(model.value.detach()),
+                observed_values[0],
+            )
+            self.assertAlmostEqual(
+                result["history"][0]["learning_rate"],
+                0.1,
+            )
+            self.assertAlmostEqual(
+                result["history"][1]["learning_rate"],
+                0.055,
+            )
+            selection = json.loads(
+                (temp_path / "checkpoint_selection.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(selection["strategy"], "best_val_rd")
+            self.assertEqual(selection["selected_epoch"], 1)
 
 
 if __name__ == "__main__":

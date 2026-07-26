@@ -418,6 +418,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Training/evaluation image width.",
     )
     parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=float(_env_or_default("ATIC_LEARNING_RATE", "0.0001")),
+        help="Initial main-optimizer learning rate.",
+    )
+    parser.add_argument(
+        "--aux-learning-rate",
+        type=float,
+        default=float(
+            _env_or_default("ATIC_AUX_LEARNING_RATE", "0.001")
+        ),
+        help="Initial entropy-bottleneck auxiliary learning rate.",
+    )
+    parser.add_argument(
+        "--lr-schedule",
+        choices=("none", "cosine"),
+        default=_env_or_default("ATIC_LR_SCHEDULE", "cosine"),
+        help=(
+            "Deterministic learning-rate schedule. Publication runs default "
+            "to cosine decay; use none only for legacy reproduction."
+        ),
+    )
+    parser.add_argument(
+        "--min-learning-rate",
+        type=float,
+        default=float(
+            _env_or_default("ATIC_MIN_LEARNING_RATE", "0.000001")
+        ),
+        help="Minimum main LR reached by cosine decay.",
+    )
+    parser.add_argument(
+        "--min-aux-learning-rate",
+        type=float,
+        default=float(
+            _env_or_default("ATIC_MIN_AUX_LEARNING_RATE", "0.00001")
+        ),
+        help="Minimum auxiliary LR reached by cosine decay.",
+    )
+    parser.add_argument(
+        "--checkpoint-selection",
+        choices=("final", "best_val_rd"),
+        default=_env_or_default(
+            "ATIC_CHECKPOINT_SELECTION",
+            "best_val_rd",
+        ),
+        help=(
+            "Checkpoint used for bitstream evaluation. best_val_rd is "
+            "selected only from the validation split."
+        ),
+    )
+    parser.add_argument(
         "--dsad-beta-max",
         type=float,
         default=float(_env_or_default("ATIC_DSAD_BETA_MAX", "0.05")),
@@ -537,6 +588,12 @@ def run_ablation_study(
     pin_memory: bool = True,
     height: int = 512,
     width: int = 512,
+    learning_rate: float = 1e-4,
+    aux_learning_rate: float = 1e-3,
+    lr_schedule: str = "cosine",
+    min_learning_rate: float = 1e-6,
+    min_aux_learning_rate: float = 1e-5,
+    checkpoint_selection: str = "best_val_rd",
     dsad_beta_max: float = 0.05,
     dsad_warmup_fraction: float = 0.20,
     dsad_ramp_fraction: float = 0.10,
@@ -562,7 +619,11 @@ def run_ablation_study(
         utc_timestamp,
         write_json,
     )
-    from atic.train import train_loop
+    from atic.train import (
+        _validate_training_controls,
+        dsad_beta_for_epoch,
+        train_loop,
+    )
 
     if seeds is None:
         seeds = [42]
@@ -584,12 +645,40 @@ def run_ablation_study(
         lambda_rates=lambda_rates,
         run_variants=run_variants,
     )
+    _validate_training_controls(
+        learning_rate=learning_rate,
+        aux_learning_rate=aux_learning_rate,
+        lr_schedule=lr_schedule,
+        min_learning_rate=min_learning_rate,
+        min_aux_learning_rate=min_aux_learning_rate,
+        checkpoint_selection=checkpoint_selection,
+        checkpoint_selection_start_epoch=1,
+        epochs=epochs,
+    )
     use_frozen_protocol = _validate_dataset_protocol(
         dataset_root,
         frozen_split_dir,
         evaluate_test,
     )
     evaluation_plan = _evaluation_plan(evaluate_test)
+    checkpoint_selection_start_epoch = 1
+    if checkpoint_selection == "best_val_rd" and dsad_beta_max > 0:
+        checkpoint_selection_start_epoch = next(
+            epoch + 1
+            for epoch in range(epochs)
+            if math.isclose(
+                dsad_beta_for_epoch(
+                    epoch,
+                    epochs,
+                    dsad_beta_max,
+                    dsad_warmup_fraction,
+                    dsad_ramp_fraction,
+                ),
+                dsad_beta_max,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        )
 
     if str(device).lower().startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(
@@ -706,6 +795,22 @@ def run_ablation_study(
             "epochs": epochs,
             "batch_size": batch_size,
             "device": device,
+            "training_controls": {
+                "learning_rate": learning_rate,
+                "aux_learning_rate": aux_learning_rate,
+                "lr_schedule": lr_schedule,
+                "min_learning_rate": min_learning_rate,
+                "min_aux_learning_rate": min_aux_learning_rate,
+                "checkpoint_selection": checkpoint_selection,
+                "causal_checkpoint_selection_start_epoch": (
+                    checkpoint_selection_start_epoch
+                ),
+                "checkpoint_selection_metric": (
+                    "val_rd_loss"
+                    if checkpoint_selection == "best_val_rd"
+                    else None
+                ),
+            },
             "seeds": seeds,
             "val_every": val_every,
             "num_workers": num_workers,
@@ -823,6 +928,19 @@ def run_ablation_study(
                         "width": width,
                         "architecture": asdict(config),
                         "dsad": dsad_settings,
+                        "training_controls": {
+                            "learning_rate": learning_rate,
+                            "aux_learning_rate": aux_learning_rate,
+                            "lr_schedule": lr_schedule,
+                            "min_learning_rate": min_learning_rate,
+                            "min_aux_learning_rate": min_aux_learning_rate,
+                            "checkpoint_selection": checkpoint_selection,
+                            "checkpoint_selection_start_epoch": (
+                                checkpoint_selection_start_epoch
+                                if variant_name in CAUSAL_DSAD_VARIANTS
+                                else 1
+                            ),
+                        },
                         "device": device,
                         "data_protocol": data_protocol,
                         "evaluation_split": "test" if evaluate_test else "val",
@@ -878,6 +996,17 @@ def run_ablation_study(
                     dsad_beta_max=dsad_settings["beta_max"],
                     dsad_warmup_fraction=dsad_settings["warmup_fraction"],
                     dsad_ramp_fraction=dsad_settings["ramp_fraction"],
+                    learning_rate=learning_rate,
+                    aux_learning_rate=aux_learning_rate,
+                    lr_schedule=lr_schedule,
+                    min_learning_rate=min_learning_rate,
+                    min_aux_learning_rate=min_aux_learning_rate,
+                    checkpoint_selection=checkpoint_selection,
+                    checkpoint_selection_start_epoch=(
+                        checkpoint_selection_start_epoch
+                        if variant_name in CAUSAL_DSAD_VARIANTS
+                        else 1
+                    ),
                     checkpoint_path=os.path.join(run_dir, "model.pth"),
                     train_log_path=os.path.join(run_dir, "train_log.jsonl"),
                 )
@@ -951,6 +1080,11 @@ def run_ablation_study(
                     "dsad_beta_max": dsad_settings["beta_max"],
                     "initial_state_sha256": initial_state_sha256,
                     "checkpoint_path": train_artifacts.get("checkpoint_path"),
+                    "checkpoint_selection": checkpoint_selection,
+                    "selected_epoch": train_artifacts.get("selected_epoch"),
+                    "selected_val_rd_loss": train_artifacts.get(
+                        "selected_val_rd_loss"
+                    ),
                     "data_protocol": data_protocol,
                     "evaluation_split": evaluation_split,
                     "frozen_bundle_id": (
@@ -1030,6 +1164,12 @@ if __name__ == "__main__":
         pin_memory=pin_memory,
         height=args.height,
         width=args.width,
+        learning_rate=args.learning_rate,
+        aux_learning_rate=args.aux_learning_rate,
+        lr_schedule=args.lr_schedule,
+        min_learning_rate=args.min_learning_rate,
+        min_aux_learning_rate=args.min_aux_learning_rate,
+        checkpoint_selection=args.checkpoint_selection,
         dsad_beta_max=args.dsad_beta_max,
         dsad_warmup_fraction=args.dsad_warmup_fraction,
         dsad_ramp_fraction=args.dsad_ramp_fraction,

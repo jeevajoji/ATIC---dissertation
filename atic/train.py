@@ -240,6 +240,60 @@ def configure_optimizers(
     return optimizer, aux_optimizer
 
 
+def _cpu_state_dict(model) -> Dict[str, torch.Tensor]:
+    """Clone a model state to CPU for validation-based checkpoint selection."""
+
+    return {
+        name: value.detach().cpu().clone()
+        for name, value in model.state_dict().items()
+    }
+
+
+def _validate_training_controls(
+    *,
+    learning_rate: float,
+    aux_learning_rate: float,
+    lr_schedule: str,
+    min_learning_rate: float,
+    min_aux_learning_rate: float,
+    checkpoint_selection: str,
+    checkpoint_selection_start_epoch: int,
+    epochs: int,
+) -> None:
+    rates = {
+        "learning_rate": learning_rate,
+        "aux_learning_rate": aux_learning_rate,
+        "min_learning_rate": min_learning_rate,
+        "min_aux_learning_rate": min_aux_learning_rate,
+    }
+    for name, value in rates.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and non-negative")
+    if learning_rate <= 0 or aux_learning_rate <= 0:
+        raise ValueError("initial learning rates must be positive")
+    if min_learning_rate > learning_rate:
+        raise ValueError("min_learning_rate must not exceed learning_rate")
+    if min_aux_learning_rate > aux_learning_rate:
+        raise ValueError(
+            "min_aux_learning_rate must not exceed aux_learning_rate"
+        )
+    if lr_schedule not in {"none", "cosine"}:
+        raise ValueError("lr_schedule must be 'none' or 'cosine'")
+    if checkpoint_selection not in {"final", "best_val_rd"}:
+        raise ValueError(
+            "checkpoint_selection must be 'final' or 'best_val_rd'"
+        )
+    if (
+        not isinstance(checkpoint_selection_start_epoch, int)
+        or isinstance(checkpoint_selection_start_epoch, bool)
+        or not 1 <= checkpoint_selection_start_epoch <= epochs
+    ):
+        raise ValueError(
+            "checkpoint_selection_start_epoch must be an integer in "
+            f"[1, {epochs}]"
+        )
+
+
 @torch.no_grad()
 def validate_loop(
     model,
@@ -318,7 +372,12 @@ def train_loop(
     val_loader=None,
     learning_rate: float = 1e-4,
     aux_learning_rate: float = 1e-3,
+    lr_schedule: str = "none",
+    min_learning_rate: float = 1e-6,
+    min_aux_learning_rate: float = 1e-5,
     grad_clip_norm: float = 1.0,
+    checkpoint_selection: str = "final",
+    checkpoint_selection_start_epoch: int = 1,
     reconstruction_path: Optional[str] = None,
     save_reconstruction_each_epoch: bool = True,
     dsad_beta_max: float = 0.0,
@@ -373,8 +432,23 @@ def train_loop(
             Main optimizer LR.
         aux_learning_rate:
             Entropy bottleneck auxiliary LR.
+        lr_schedule:
+            ``none`` or a fixed ``cosine`` schedule. The cosine schedule is
+            deterministic and therefore identical across paired ablation arms.
+        min_learning_rate:
+            Final main-optimizer LR used by the cosine schedule.
+        min_aux_learning_rate:
+            Final auxiliary-optimizer LR used by the cosine schedule.
         grad_clip_norm:
             Gradient clipping threshold.
+        checkpoint_selection:
+            ``final`` or ``best_val_rd``. The latter restores the checkpoint
+            with the lowest validation rate-distortion loss before entropy
+            table update and actual-bitstream evaluation.
+        checkpoint_selection_start_epoch:
+            First one-based epoch eligible for best-validation selection.
+            Paired DSAD studies use the first epoch at full beta so an early
+            beta-zero warm-up checkpoint cannot masquerade as a DSAD result.
         reconstruction_path:
             Path to latest/final reconstruction image.
         save_reconstruction_each_epoch:
@@ -401,6 +475,20 @@ def train_loop(
 
     if epochs <= 0:
         raise ValueError("epochs must be positive")
+    _validate_training_controls(
+        learning_rate=learning_rate,
+        aux_learning_rate=aux_learning_rate,
+        lr_schedule=lr_schedule,
+        min_learning_rate=min_learning_rate,
+        min_aux_learning_rate=min_aux_learning_rate,
+        checkpoint_selection=checkpoint_selection,
+        checkpoint_selection_start_epoch=checkpoint_selection_start_epoch,
+        epochs=epochs,
+    )
+    if checkpoint_selection == "best_val_rd" and val_loader is None:
+        raise ValueError(
+            "best_val_rd checkpoint selection requires a validation loader"
+        )
     if lambda_rd is not None and lambda_rate is not None:
         raise ValueError("Pass lambda_rd, not both lambda_rd and lambda_rate")
     if lambda_rd is None:
@@ -433,6 +521,20 @@ def train_loop(
         learning_rate=learning_rate,
         aux_learning_rate=aux_learning_rate,
     )
+    scheduler = None
+    aux_scheduler = None
+    if lr_schedule == "cosine":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=epochs,
+            eta_min=min_learning_rate,
+        )
+        if aux_optimizer is not None:
+            aux_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                aux_optimizer,
+                T_max=epochs,
+                eta_min=min_aux_learning_rate,
+            )
 
     criterion = ATICLoss(
         lambda_rd=lambda_rd,
@@ -446,16 +548,27 @@ def train_loop(
     print(
         f"[{variant_name}] Training started on {device} | "
         f"lambda_rd={lambda_rd} | dsad_beta_max={dsad_beta_max} | "
-        f"lr={learning_rate} | aux_lr={aux_learning_rate}"
+        f"lr={learning_rate} | aux_lr={aux_learning_rate} | "
+        f"lr_schedule={lr_schedule} | "
+        f"checkpoint_selection={checkpoint_selection}"
     )
 
     if aux_optimizer is None:
         print(f"[{variant_name}] No auxiliary entropy parameters found.")
 
     history = []
+    best_state_dict = None
+    best_val_rd_loss = math.inf
+    best_epoch = None
 
     for epoch in range(epochs):
         model.train()
+        epoch_learning_rate = float(optimizer.param_groups[0]["lr"])
+        epoch_aux_learning_rate = (
+            None
+            if aux_optimizer is None
+            else float(aux_optimizer.param_groups[0]["lr"])
+        )
         epoch_beta = dsad_beta_for_epoch(
             epoch,
             epochs,
@@ -541,6 +654,8 @@ def train_loop(
                 "lambda_rd": lambda_rd,
                 "dsad_beta_max": dsad_beta_max,
                 "variant": variant_name,
+                "learning_rate": epoch_learning_rate,
+                "aux_learning_rate": epoch_aux_learning_rate,
             }
             epoch_avg.update(
                 {
@@ -559,6 +674,35 @@ def train_loop(
             )
             if val_avg is not None:
                 epoch_avg.update(val_avg)
+
+            selection_eligible = (
+                checkpoint_selection == "best_val_rd"
+                and val_avg is not None
+                and epoch + 1 >= checkpoint_selection_start_epoch
+            )
+            selected_this_epoch = False
+            if selection_eligible:
+                val_rd_loss = float(epoch_avg["val_rd_loss"])
+                if not math.isfinite(val_rd_loss):
+                    raise RuntimeError(
+                        "Validation RD loss became non-finite at "
+                        f"epoch {epoch + 1}"
+                    )
+                if val_rd_loss < best_val_rd_loss:
+                    best_state_dict = _cpu_state_dict(model)
+                    best_val_rd_loss = val_rd_loss
+                    best_epoch = epoch + 1
+                    selected_this_epoch = True
+            epoch_avg.update(
+                {
+                    "checkpoint_selection_eligible": selection_eligible,
+                    "selected_as_best": selected_this_epoch,
+                    "best_epoch_so_far": best_epoch,
+                    "best_val_rd_loss_so_far": (
+                        None if best_epoch is None else best_val_rd_loss
+                    ),
+                }
+            )
 
             history.append(epoch_avg)
 
@@ -584,6 +728,7 @@ def train_loop(
                 f" (weighted={epoch_avg['weighted_dsad_loss']:.4f},"
                 f" beta={epoch_avg['beta']:.4g})"
                 f" | Aux: {epoch_avg['aux_loss']:.4f}"
+                f" | LR: {epoch_learning_rate:.3g}"
                 f"{val_msg}"
             )
 
@@ -627,8 +772,29 @@ def train_loop(
                     title=f"{variant_name} | latest epoch {epoch + 1}",
                 )
 
+        if scheduler is not None:
+            scheduler.step()
+        if aux_scheduler is not None:
+            aux_scheduler.step()
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    selected_epoch = epochs
+    selected_val_rd_loss = None
+    if checkpoint_selection == "best_val_rd":
+        if best_state_dict is None or best_epoch is None:
+            raise RuntimeError(
+                "No validation checkpoint was eligible for selection"
+            )
+        model.load_state_dict(best_state_dict)
+        selected_epoch = best_epoch
+        selected_val_rd_loss = best_val_rd_loss
+        print(
+            f"[{variant_name}] Restored best validation-RD checkpoint "
+            f"from epoch {selected_epoch} "
+            f"(val_rd_loss={selected_val_rd_loss:.6f})."
+        )
 
     # Update entropy CDF tables if model supports it.
     # This is useful before final evaluation/checkpointing.
@@ -652,7 +818,39 @@ def train_loop(
 
     print(f"[{variant_name}] Saved checkpoint to {checkpoint_path}.")
 
+    selection_path = os.path.join(
+        os.path.dirname(checkpoint_path),
+        "checkpoint_selection.json",
+    )
+    with open(selection_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "strategy": checkpoint_selection,
+                "selection_metric": (
+                    "val_rd_loss"
+                    if checkpoint_selection == "best_val_rd"
+                    else None
+                ),
+                "selection_start_epoch": checkpoint_selection_start_epoch,
+                "selected_epoch": selected_epoch,
+                "selected_val_rd_loss": selected_val_rd_loss,
+                "total_epochs": epochs,
+                "lr_schedule": lr_schedule,
+                "initial_learning_rate": learning_rate,
+                "minimum_learning_rate": min_learning_rate,
+                "initial_aux_learning_rate": aux_learning_rate,
+                "minimum_aux_learning_rate": min_aux_learning_rate,
+            },
+            handle,
+            indent=2,
+            sort_keys=True,
+        )
+        handle.write("\n")
+
     return {
         "history": history,
         "checkpoint_path": checkpoint_path,
+        "checkpoint_selection_path": selection_path,
+        "selected_epoch": selected_epoch,
+        "selected_val_rd_loss": selected_val_rd_loss,
     }
