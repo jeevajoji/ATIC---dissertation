@@ -61,12 +61,39 @@ overlap changes the 512x512 latent geometry from 8x8 to 4x4. Use the new
 Plain_Swin_Hyperprior variant: overlap and hyperprior remain enabled; SAG,
 CBAM, and adaptive gain are disabled.
 
-The next run is limited to seed 42, lambdas 0.0018 and 0.013, 60 epochs,
-batch size 4, cosine learning rates, DSAD beta 0, and validation-only real
-bitstreams. Pass requires the high-lambda arm to improve actual BPP by at
-least 0.01 and PSNR by at least 0.25 dB, with estimated BPP agreeing. If it
-fails, stop DSAD and test the official CompressAI MeanScaleHyperprior oracle,
-then isolate the encoder terminal latent LayerNorm. Beauty remains locked.
+The corrected two-rate Plain_Swin_Hyperprior diagnostic is complete. The
+high-lambda arm increased estimated BPP by 0.014384 and actual complete-file
+BPP by 0.014160, so both numeric rate checks passed. PSNR increased by only
+0.150 dB, below the predeclared 0.250 dB margin, so the numeric criterion
+failed. The selected checkpoints occurred at epochs 8 and 3 and achieved only
+10.023 and 10.174 dB, respectively.
+These runs were also marked Git-dirty solely because six pre-existing,
+untracked root-level log files were visible to the provenance recorder.
+Their metrics are retained as diagnostic-only evidence and are not eligible
+for a publication claim.
+
+DSAD and the four-rate ATIC curve remain stopped. The next predeclared check
+is an official pretrained CompressAI MeanScaleHyperprior oracle evaluated
+with real bitstreams on the same frozen validation split. This tests whether
+the dataset/evaluation pipeline can exhibit the expected rate-quality response
+without consuming another long training budget. If the oracle passes, first
+isolate the encoder terminal latent LayerNorm while holding the current data
+fixed; training-data expansion is a subsequent, separately controlled change.
+Beauty remains locked.
+
+The oracle protocol is fixed before execution:
+
+1. official CompressAI 1.2.8 mbt2018_mean MSE checkpoints;
+2. pretrained quality levels 1 and 8;
+3. the 60-image ShakeNDry validation manifest only;
+4. rate from the real y+z entropy-string payload returned by compress();
+5. quality from the reconstruction returned by decompress();
+6. a clean Git commit and the pinned Torch/CUDA/dependency environment; and
+7. minimum quality-8 minus quality-1 margins of 0.01 BPP and 0.25 dB PSNR.
+
+This oracle uses payload BPP because the upstream reference has no ATIC
+container header. It tests pipeline response and is not a direct absolute-BPP
+comparison against the complete .atic file rate.
 
 The causal DSAD comparison changes only beta_max:
 

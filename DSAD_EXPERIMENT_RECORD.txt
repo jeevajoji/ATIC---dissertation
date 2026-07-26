@@ -840,6 +840,112 @@ test of the encoder's terminal latent LayerNorm. No Beauty evaluation is
 allowed during this recovery sequence.
 
 
+14.3 RESULT OF THE CORRECTED TWO-RATE TRAINER GATE
+--------------------------------------------------
+
+The two arms completed at commit:
+
+    e010ede7c4bfcb9c1b90813af75ba6701465c5c3
+
+Both used Plain_Swin_Hyperprior, seed 42, 60 epochs, batch size 4, corrected
+main-only gradient clipping, cosine learning rates, DSAD beta 0, and best
+validation-RD checkpoint selection from epoch 1.
+
+Results:
+
+    lambda   selected epoch   estimated BPP   complete-file BPP   PSNR
+    0.0018          8            0.026825          0.029053       10.023
+    0.013           3            0.041208          0.043213       10.174
+
+High-minus-low changes:
+
+    estimated BPP:  +0.014384
+    complete-file BPP: +0.014160
+    PSNR:           +0.150 dB
+
+Predeclared checks:
+
+    actual-BPP margin >= 0.01:   pass
+    estimated-BPP ordering:      pass
+    PSNR margin >= 0.25 dB:      fail
+    numeric criterion:           fail
+    strict provenance gate:      inadmissible (dirty marker)
+    Beauty evaluated:            no
+
+The corrected two-rate diagnostic exhibited directional rate response: both
+the differentiable estimate and the actual complete-file coded rate moved
+upward for the larger distortion weight. This provides single-seed diagnostic
+evidence against a completely disconnected lambda or rate path. It did not
+establish adequate rate-distortion learning, because the quality separation
+missed the locked threshold and both selected checkpoints produced very low
+reconstruction quality near 10 dB.
+
+The unusually early selected epochs, 8 for lambda 0.0018 and 3 for lambda
+0.013, are consistent with rapid validation deterioration or an objective
+that reduces rate without learning a sufficiently useful reconstruction.
+This is not evidence that DSAD failed: SAG, CBAM, adaptive gain, and DSAD were
+all absent from this internal trainer control.
+
+Provenance qualification:
+
+Before launch, the tracked tree and commit matched the published final branch,
+but six old root-level *.log files were untracked. The environment recorder
+therefore stored is_dirty=true for both runs. The files cannot participate in
+Python module loading and the two arms have identical recorded code, data,
+initialisation, and controls, but the strict publication analyser correctly
+refused the dirty marker. The measurements above were recovered through a
+separately labelled diagnostic-only report. Original metadata was not edited.
+These two points must not be presented as publication results. Exactly the six
+historical root-level logs are ignored by Git in the next commit so subsequent
+runs can record a tracked-code-clean tree without deleting those artifacts;
+future untracked root files remain visible to the dirty-state check.
+
+Decision:
+
+    1. do not relax the predeclared 0.25 dB threshold after observing 0.150 dB;
+    2. do not run the four-rate ATIC or resume DSAD;
+    3. evaluate an official pretrained CompressAI MeanScaleHyperprior on the
+       same locked validation split using real bitstreams;
+    4. if that oracle gives a normal monotonic RD response, localise the defect
+       to ATIC training/architecture, beginning with terminal latent LayerNorm
+       and the very small, non-augmented training corpus; and
+    5. keep Beauty locked.
+
+
+14.4 PREDECLARED COMPRESSAI ORACLE
+----------------------------------
+
+Before examining any oracle result, the following protocol was committed:
+
+    library/model:   CompressAI 1.2.8 mbt2018_mean
+    architecture:    official pretrained MeanScaleHyperprior
+    optimisation:    MSE model-zoo checkpoints
+    qualities:       1 and 8
+    data:            frozen 60-image ShakeNDry validation manifest
+    rate:            real y+z entropy-string payload bytes from compress()
+    reconstruction:  output of decompress()
+    minimum delta:   quality 8 - quality 1 >= 0.01 BPP and >= 0.25 dB
+    provenance:      clean Git commit, pinned software, model-state hashes
+    Beauty:          locked
+
+CompressAI does not define the ATIC file container for this upstream model, so
+the oracle reports entropy-payload BPP rather than fabricating a container
+header. Its absolute BPP is therefore not compared directly with ATIC's
+complete-file BPP. The diagnostic asks only whether the same frozen validation
+images and metric pipeline can show a strong, correctly ordered response from
+a known pretrained learned codec.
+
+Interpretation is fixed:
+
+    1. If the oracle passes, the validation images, PSNR calculation, and real
+       entropy-stream accounting can exhibit a normal response. This supports,
+       but does not prove, localising the ATIC failure to its training or
+       architecture.
+    2. If the oracle fails, stop architecture changes and audit the shared
+       dataset/evaluation path.
+    3. Under neither result is Beauty unlocked.
+
+
 15. CLAIMS CURRENTLY SUPPORTED
 ------------------------------
 
@@ -867,7 +973,11 @@ The dissertation may currently state that:
        imposed a strong one-channel spatial normalisation and therefore did
        not cleanly isolate BatchNorm; and
    12. the optimiser audit identified stale auxiliary entropy gradients in
-       the main global clipping norm, which confounds all completed long runs.
+       the main global clipping norm, which confounds all completed long runs;
+       and
+   13. after correcting that defect, a seed-42, two-rate plain control provided
+       diagnostic evidence of matching estimated and coded rate ordering, but
+       failed the predeclared quality-response margin.
 
 The negative result is useful: it prevented a misleading claim based on a
 single rate point and identified baseline convergence as a prerequisite for a
@@ -975,6 +1085,19 @@ GroupNorm SAG analysis:
     /home/250399192/ATIC---dissertation/ablation_results/
     groupnorm_sag_gate/groupnorm_sag_analysis.json
 
+Corrected plain-Swin trainer gate:
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    plain_swin_trainer_gate/low/plain_swin_low_gpu0_20260726_132614
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    plain_swin_trainer_gate/high/plain_swin_high_gpu1_20260726_132630
+
+Diagnostic-only rate-response report:
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    plain_swin_trainer_gate/diagnostic_rate_response.json
+
 
 18. THESIS-READY INTERIM RESULTS PARAGRAPH
 ------------------------------------------
@@ -1014,9 +1137,17 @@ importantly, the audit identified stale auxiliary entropy gradients
 contaminating main-gradient clipping from the second batch onward. These
 architecture-cause interpretations are therefore withdrawn pending corrected
 controls. All completed long runs are treated as confounded diagnostic
-evidence, not positive evidence for DSAD. The corrected next gate uses only
-two extreme lambdas on an overlap-preserving plain Swin hyperprior, while the
-independent Beauty test remains locked.
+evidence, not positive evidence for DSAD. The corrected gate used two extreme
+lambdas on an overlap-preserving plain Swin hyperprior, while the independent
+Beauty test remained locked. Increasing lambda from 0.0018 to 0.013 increased
+estimated BPP by 0.014384 and actual complete-file BPP by 0.014160, providing
+single-seed diagnostic evidence of directional rate response, but improved
+PSNR by only 0.150 dB and therefore failed the predeclared 0.250 dB quality
+margin. The selected checkpoints occurred at epochs 8 and 3 with PSNR values
+near 10 dB. Because pre-existing untracked log files caused both runs to carry
+a dirty provenance marker, the measurements are explicitly diagnostic-only.
+The next step is a pretrained CompressAI MeanScaleHyperprior oracle on the same
+locked validation split before any further ATIC or DSAD training.
 
 
 END OF RECORD

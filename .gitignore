@@ -1,6 +1,15 @@
 # Ignore to-do list
 todo.txt
 
+# Ignore the six historical cluster logs that predated provenance capture.
+# Future root-level artifacts remain visible to Git's dirty-state check.
+/baseline_rescue_gpu0_20260726_061739.log
+/baseline_rescue_gpu1_20260726_061754.log
+/groupnorm_sag_gpu0_20260726_105859.log
+/groupnorm_sag_gpu1_20260726_105918.log
+/no_adaptive_gain_gpu0_20260726_080249.log
+/no_adaptive_gain_gpu1_20260726_080304.log
+
 # Ignore virtual environments
 .venv/
 __pycache__/
