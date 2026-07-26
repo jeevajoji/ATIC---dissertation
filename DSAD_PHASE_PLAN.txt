@@ -124,13 +124,15 @@ validation-only bitstreams. The no-norm diagnosis passes only if:
 1. its high-minus-low actual BPP is at least +0.01;
 2. its high-minus-low estimated BPP is positive;
 3. its high-minus-low PSNR is at least +0.25 dB; and
-4. its actual coded RD objective,
+4. its post-hoc actual-rate RD score,
        BPP_actual + lambda * 255^2 * MSE,
    is strictly lower than the freshly trained control at both lambdas.
 
 The archived dirty Plain checkpoints are not used as the control.
 The gate also requires matching paired-common initial-state hashes computed
 after excluding only encoder.norm.weight and encoder.norm.bias.
+Checkpoint selection still uses estimated validation RD; the score in item 4
+is a post-hoc comparison, not the optimized checkpoint-selection objective.
 
 The causal DSAD comparison changes only beta_max:
 

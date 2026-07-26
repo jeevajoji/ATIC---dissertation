@@ -339,6 +339,10 @@ def build_report(
         },
         "actual_rd": {
             "formula": "BPP_actual + lambda_rd * 255^2 * MSE",
+            "interpretation": (
+                "post-hoc actual-rate RD score; checkpoint selection used "
+                "the estimated validation RD objective"
+            ),
             "control": control_rd,
             "intervention": intervention_rd,
             "intervention_minus_control": {
@@ -390,7 +394,10 @@ def print_report(report: Dict[str, object]) -> None:
         rate = report["rate_response"][label]
         rd = report["actual_rd"][label]
         print(f"\n{label}: {rate['variant']}")
-        print("lambda    estimated BPP    actual BPP    PSNR      MSE       actual RD")
+        print(
+            "lambda    estimated BPP    actual BPP    PSNR      MSE"
+            "    actual-rate RD"
+        )
         for rate_label in ("low", "high"):
             row = rate[rate_label]
             point = rd[rate_label]

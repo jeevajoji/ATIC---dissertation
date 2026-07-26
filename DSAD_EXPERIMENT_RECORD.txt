@@ -1029,11 +1029,14 @@ Predeclared no-norm pass condition:
     1. high-minus-low actual BPP >= +0.01;
     2. high-minus-low estimated BPP > 0;
     3. high-minus-low PSNR >= +0.25 dB; and
-    4. BPP_actual + lambda * 255^2 * MSE is strictly lower than the freshly
-       trained control at both lambdas.
+    4. the post-hoc actual-rate RD score,
+           BPP_actual + lambda * 255^2 * MSE,
+       is strictly lower than the freshly trained control at both lambdas.
 
 The archived dirty Plain checkpoints are inadmissible as the comparator. This
-is an architecture/rate-control diagnostic, not evidence for DSAD.
+is an architecture/rate-control diagnostic, not evidence for DSAD. The
+post-hoc score in condition 4 is not the checkpoint-selection objective;
+checkpoints are selected using estimated validation RD.
 
 
 15. CLAIMS CURRENTLY SUPPORTED
