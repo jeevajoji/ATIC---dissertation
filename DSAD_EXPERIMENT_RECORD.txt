@@ -1,0 +1,705 @@
+ATIC: DECODER-SYNCHRONISED ATTENTION DISTILLATION
+RESEARCH PROGRESS, RESULTS, FAILURES, AND NEXT EXPERIMENT
+========================================================
+
+Last updated: 26 July 2026
+Repository branch: final
+Current protocol commit: c463640
+
+
+1. PURPOSE AND STATUS OF THIS DOCUMENT
+--------------------------------------
+
+This document records the work completed on the ATIC learned image-compression
+project, including successful implementation work, validation results,
+negative findings, technical failures, and the next experimental gate.
+
+It is deliberately conservative. Results labelled as pilot or validation
+results must not be presented as independent-test results. At the time of this
+record, the frozen Beauty test sequence has not been evaluated. No valid
+multi-rate BD-rate result has yet been obtained, and no state-of-the-art claim
+is supported.
+
+
+2. PROPOSED RESEARCH CONTRIBUTION
+---------------------------------
+
+The proposed contribution is Decoder-Synchronised Attention Distillation
+(DSAD) for learned image compression.
+
+An encoder can observe the original image and can therefore learn a strong
+spatial attention map. A decoder cannot observe the original image. Directly
+using the encoder attention map during decoding would either make decoding
+impossible or require the map to be transmitted as additional side
+information.
+
+DSAD instead uses two maps during training:
+
+    encoder features -> encoder-only teacher attention map
+
+    decoded z_hat -> hyperdecoder features -> student gain map
+
+The teacher is training-only. The deployable student map is predicted from
+z_hat and decoder-side network weights. Therefore, the encoder and decoder can
+independently reproduce the same gain map without transmitting a separate
+attention map.
+
+The current DSAD loss compares spatially centred log-gain maps:
+
+    centred_log(g) = log(g) - spatial_mean(log(g))
+
+    L_DSAD = SmoothL1(
+        centred_log(student_gain),
+        stop_gradient(centred_log(teacher_gain))
+    )
+
+The complete training objective is:
+
+    L = R_y + R_z + lambda_rd * 255^2 * MSE + beta * L_DSAD
+
+The centring operation removes global log-scale information from the
+distillation target. Its purpose is to teach spatial bit reallocation rather
+than allowing the student to reduce the loss by uniformly increasing or
+decreasing every gain value. This does not guarantee equal actual bitrate;
+actual coded-file BPP must still be measured.
+
+The proposed novelty is therefore not merely "using attention". The intended
+novelty is transferring an encoder-only spatial allocation signal into a
+causal decoder-reproducible gain mechanism without sending a separate
+attention map. Whether this mechanism improves compression efficiency remains
+an experimental question.
+
+
+3. OPERATIONAL CODEC AND TRANSFERABILITY
+----------------------------------------
+
+The project implements a real entropy-coded ATIC container rather than saving
+latent tensors in an NPZ file.
+
+The transferred .atic file contains:
+
+    1. a versioned header;
+    2. entropy-coded z bytes; and
+    3. entropy-coded y bytes.
+
+The receiver also needs:
+
+    1. the exact trained model checkpoint;
+    2. compatible ATIC decoder code and dependencies; and
+    3. the .atic compressed file.
+
+Sending z_hat alone is not sufficient. z_hat supplies hyperprior information
+and generates the decoder-synchronised gain/probability parameters, but y is
+the primary image latent and must also be entropy decoded.
+
+Completed codec checks showed:
+
+    encoder latent repeated exactly:               true
+    repeated bitstreams identical:                 true
+    z_hat forward versus coded stream exact:       true
+    gain forward versus coded stream exact:        true
+    y_hat forward versus coded stream exact:       true
+    x_hat forward versus coded stream allclose:    true
+    maximum x_hat absolute difference:             1.7881393432617188e-07
+
+The very small x_hat difference is floating-point decoder arithmetic, not a
+latent or bitstream mismatch.
+
+
+4. COMPUTE AND SOFTWARE ENVIRONMENT
+-----------------------------------
+
+Training host:
+
+    CSML01
+
+Available physical GPUs used by this project:
+
+    GPU 0: NVIDIA RTX A6000, approximately 47.4 GiB
+    GPU 1: NVIDIA RTX A6000, approximately 47.4 GiB
+
+Verified software environment:
+
+    Python:       3.10
+    PyTorch:      2.6.0+cu124
+    torchvision:  0.21.0+cu124
+    CompressAI:   1.2.8
+    timm:         1.0.27 on CSML01
+    NumPy:        1.26.4
+    Pillow:       12.2.0
+    CUDA runtime: 12.4
+
+NVML reported a driver/library version mismatch, so nvidia-smi could not
+initialise. This did not prevent CUDA computation. Direct matrix
+multiplication and memory checks succeeded independently on physical GPUs 0
+and 1. Training processes were restricted using CUDA_VISIBLE_DEVICES so that
+each process saw exactly one allowed GPU as logical cuda:0.
+
+
+5. FROZEN VALIDATION PROTOCOL
+-----------------------------
+
+A sequence-disjoint UVG-derived dataset bundle was prepared at 512 x 512.
+The split was frozen before DSAD beta selection.
+
+Dataset root:
+
+    /home/250399192/datasets/UVG_DSAD_screen_v1/dataset_512
+
+Frozen split directory:
+
+    /home/250399192/datasets/UVG_DSAD_screen_v1/frozen_split
+
+Bundle identifier:
+
+    9af91138ebe5b31b75526b64a9f579fb85edac6e445008a5537486d2d652e5c6
+
+Training split:
+
+    sequences:     Bosphorus, HoneyBee, YachtRide
+    image count:   360
+    content SHA:   1046e3e9ac2eb4cdcfe9166f0afdc42e26ec8d89ce9f6a2578edbffb9935586b
+
+Validation split:
+
+    sequence:      ShakeNDry
+    image count:   60
+    content SHA:   a1d752328332e1c11f96fd7956c70f9ee1a8aef1dbeec20f68936c3e8169b253
+
+Independent test split:
+
+    sequence:      Beauty
+    image count:   120
+    content SHA:   30275fd165690bb90b3cfb623d6551adb4983b05e08ccd0b43e0a9302553cbfa
+
+Beauty remained locked during integration tests, beta calibration,
+confirmation, and multi-rate extension. This prevents test-set feedback from
+influencing architecture, beta, checkpoint, or training-protocol choices.
+
+
+6. CONTROLLED DSAD COMPARISON
+-----------------------------
+
+The causal DSAD comparison uses two named variants:
+
+    Full_ATIC_NoDSAD: identical full architecture, beta = 0
+    Full_ATIC_DSAD:   identical full architecture, beta > 0
+
+The architecture, initialisation seed, dataset order, lambda_rd, optimiser,
+training duration, entropy model, adaptive gain mechanism, and evaluation
+method are matched. The intended causal difference is the DSAD loss weight.
+
+The Full_ATIC_NoDSAD arm is not a plain hyperprior. It retains the complete
+ATIC architecture and adaptive gain student. It is the correct control for
+asking whether distillation helps the same deployable model.
+
+
+7. TWO-EPOCH INTEGRATION PILOT
+------------------------------
+
+Purpose:
+
+    Verify that DSAD gradients, scheduling, logging, reconstruction saving,
+    entropy coding, checkpoints, and actual-bitstream evaluation were
+    connected correctly.
+
+Configuration:
+
+    data:          small Bosphorus pilot
+    lambda_rd:     0.0067
+    epochs:        2
+    seed:          42
+    DSAD beta max: 0.05
+
+Validation comparison:
+
+    Metric             NoDSAD       DSAD        Delta
+    -------------------------------------------------------
+    Actual BPP         0.479187     0.479004    -0.000183
+    PSNR              15.064218    15.064278    +0.000060
+    SSIM               0.500510     0.500548    +0.000038
+    MS-SSIM            0.505228     0.505242    +0.000015
+    LPIPS              0.671326     0.671299    -0.000028
+    DISTS              0.702555     0.702550    -0.000005
+    MSE                0.031194     0.031194    approximately zero
+
+Interpretation:
+
+Every metric moved in the favourable direction, but the changes were
+scientifically negligible. The BPP change corresponds to only approximately
+six bytes per 512 x 512 image. This experiment proved implementation
+connectivity only; it did not prove DSAD efficacy.
+
+
+8. VALIDATION-ONLY BETA CALIBRATION
+-----------------------------------
+
+Purpose:
+
+    Select a DSAD beta for further validation experiments without accessing
+    the independent Beauty test set.
+
+Configuration:
+
+    lambda_rd:  0.0067
+    epochs:     12
+    seed:       42
+    candidates: beta = 0.5, 2, and 8
+    comparison: each beta used a paired Full_ATIC_NoDSAD control
+
+Delta is DSAD minus the paired NoDSAD control.
+For BPP, LPIPS, DISTS, MSE, and RD objective, lower is better.
+For PSNR, SSIM, and MS-SSIM, higher is better.
+
+Beta = 0.5:
+
+    delta actual BPP:          -0.009332
+    delta PSNR:                +0.6972 dB
+    delta SSIM:                +0.012999
+    delta MS-SSIM:             +0.028917
+    delta LPIPS:               +0.057471  (worse)
+    delta DISTS:               -0.025555
+    delta MSE:                 -0.007328
+    delta actual-RD objective: -3.201847
+    final DSAD cosine:          0.1255
+    student gain range:         [0.907, 1.058]
+
+Beta = 2:
+
+    delta actual BPP:          +0.113877  (worse)
+    delta PSNR:                -0.2612 dB (worse)
+    delta SSIM:                -0.003447  (worse)
+    delta MS-SSIM:             +0.053103
+    delta LPIPS:               +0.222907  (worse)
+    delta DISTS:               -0.018302
+    delta MSE:                 -0.008781
+    delta actual-RD objective: -3.711566
+    final DSAD cosine:          0.6840
+    student gain range:         [0.928, 1.043]
+
+Beta = 8:
+
+    delta actual BPP:          -0.025474
+    delta PSNR:                +2.2934 dB
+    delta SSIM:                +0.016087
+    delta MS-SSIM:             +0.020704
+    delta LPIPS:               +0.047760  (worse)
+    delta DISTS:               -0.019249
+    delta MSE:                 -0.025861
+    delta actual-RD objective: -11.292054
+    final DSAD cosine:          0.8223
+    student gain range:         [0.838, 1.145]
+
+No gain-saturation warning was raised for any candidate. Beta = 8 was advanced
+because it produced the strongest validation PSNR, DISTS, MSE, actual BPP, RD
+objective, and teacher-student cosine result in this short calibration.
+
+This selection was provisional because it used only one seed, one rate point,
+and short training.
+
+
+9. THREE-SEED BETA = 8 CONFIRMATION
+-----------------------------------
+
+Purpose:
+
+    Test whether the beta = 8 effect repeated across random seeds at the
+    selected validation lambda.
+
+Configuration:
+
+    lambda_rd:     0.0067
+    epochs:        30
+    seeds:         42, 123, 999
+    DSAD beta max: 8
+    evaluation:    validation only
+
+Per-seed DSAD-minus-control results:
+
+Seed 42:
+
+    delta actual BPP: +0.025063
+    delta PSNR:       +1.0719 dB
+    delta SSIM:       +0.01225
+    delta LPIPS:      -0.04888
+    delta DISTS:      +0.00166
+    delta RD:         -2.903340
+    DSAD cosine:       0.7255
+    gain range:        [0.841, 1.314]
+
+Seed 123:
+
+    delta actual BPP: +0.213780
+    delta PSNR:       +0.5412 dB
+    delta SSIM:       +0.01287
+    delta LPIPS:      -0.00925
+    delta DISTS:      +0.01994
+    delta RD:         +0.302039
+    DSAD cosine:       0.2909
+    gain range:        [0.811, 1.356]
+
+Seed 999:
+
+    delta actual BPP: +0.340078
+    delta PSNR:       +1.3177 dB
+    delta SSIM:       -0.00364
+    delta LPIPS:      -0.11780
+    delta DISTS:      -0.01388
+    delta RD:         -5.875403
+    DSAD cosine:       0.1913
+    gain range:        [0.809, 1.559]
+
+Three-seed aggregate:
+
+    Metric       Mean delta   Std. dev.   95% confidence interval    Favourable
+    --------------------------------------------------------------------------
+    Actual BPP   +0.192973    0.158535    [-0.200880, +0.586827]     0/3
+    PSNR         +0.976918    0.396885    [-0.009080, +1.962915]     3/3
+    SSIM         +0.007160    0.009358    [-0.016088, +0.030408]     2/3
+    MS-SSIM      -0.007177    0.032725    [-0.088477, +0.074123]     1/3
+    LPIPS        -0.058644    0.054928    [-0.195103, +0.077815]     3/3
+    DISTS        +0.002573    0.016931    [-0.039490, +0.044635]     1/3
+    MSE          -0.006929    0.007237    [-0.024907, +0.011050]     2/3
+    Actual RD    -2.825568    3.089455    [-10.500819, +4.849684]    2/3
+
+Interpretation:
+
+DSAD improved PSNR and LPIPS in all three seeds, but it also increased actual
+BPP in all three seeds. Therefore, the result could mean that DSAD simply
+spent more bits to reconstruct better images. The confidence intervals crossed
+zero, and a single-lambda comparison could not separate bit allocation quality
+from bitrate increase. A multi-rate comparison was required.
+
+
+10. FOUR-RATE EXTENSION AND INVALID BD-RATE
+--------------------------------------------
+
+Purpose:
+
+    Construct matched NoDSAD and DSAD validation RD curves and calculate
+    PSNR BD-rate across lambda_rd values:
+
+        0.0018, 0.0035, 0.0067, 0.013
+
+Seed 42:
+
+    lambda      NoDSAD BPP/PSNR       DSAD BPP/PSNR
+    --------------------------------------------------
+    0.0018      0.041831 / 13.432      0.020530 / 9.911
+    0.0035      0.065948 / 14.777      0.139178 / 15.834
+    0.0067      0.138802 / 13.894      0.163865 / 14.966
+    0.0130      0.147406 / 14.602      0.116132 / 14.289
+
+    NoDSAD monotonic: false
+    DSAD monotonic:   false
+    PSNR BD-rate:     invalid
+
+Seed 123:
+
+    lambda      NoDSAD BPP/PSNR       DSAD BPP/PSNR
+    --------------------------------------------------
+    0.0018      0.045361 / 11.093      0.042999 / 14.089
+    0.0035      0.240417 / 15.802      0.184145 / 13.856
+    0.0067      0.445471 / 14.506      0.659251 / 15.047
+    0.0130      0.147056 / 11.353      0.374870 / 15.553
+
+    NoDSAD monotonic: false
+    DSAD monotonic:   false
+    PSNR BD-rate:     invalid
+
+Seed 999:
+
+    lambda      NoDSAD BPP/PSNR       DSAD BPP/PSNR
+    --------------------------------------------------
+    0.0018      0.040283 / 9.857       0.059499 / 15.741
+    0.0035      0.038940 / 9.886       0.054472 / 13.463
+    0.0067      0.155168 / 12.543      0.495245 / 13.860
+    0.0130      0.207135 / 8.605       0.194214 / 7.941
+
+    NoDSAD monotonic: false
+    DSAD monotonic:   false
+    PSNR BD-rate:     invalid
+
+Aggregate outcome:
+
+    valid seed-level curves: 0/3
+    PSNR BD-rate aggregate:   invalid
+    independent test used:    no
+
+
+11. WHERE THE EXPERIMENT FAILED
+-------------------------------
+
+The multi-rate experiment failed before it could test the DSAD compression
+claim. Increasing lambda_rd gives distortion more weight, so a sufficiently
+trained family of models should normally move towards higher reconstruction
+quality and generally higher bitrate. Small deviations may occur, but the
+observed reversals were large.
+
+Examples include:
+
+    Seed 123 NoDSAD:
+        lambda 0.0035 -> PSNR 15.802 dB
+        lambda 0.0130 -> PSNR 11.353 dB
+
+    Seed 999 NoDSAD:
+        lambda 0.0067 -> PSNR 12.543 dB
+        lambda 0.0130 -> PSNR 8.605 dB
+
+Because the NoDSAD control failed too, non-monotonicity cannot be attributed
+only to DSAD. The BD-rate implementation correctly rejected these curves.
+Forcing a polynomial through them or deleting inconvenient points would be
+scientifically invalid.
+
+The main confirmed weaknesses in the completed protocol were:
+
+    1. Each model trained for only 30 epochs.
+    2. The frozen training split has 360 images and batch size was 4.
+    3. This gives 90 updates per epoch, or only 2,700 updates per model.
+    4. The main learning rate remained fixed at 1e-4.
+    5. No learning-rate scheduler was used.
+    6. The final epoch was evaluated even if an earlier validation checkpoint
+       had a better RD objective.
+
+Additional architectural suspects, not yet proven as causes, are:
+
+    1. Spatial Attention Gate BatchNorm with batch size 4 and small deep
+       feature maps, which may produce unstable running statistics.
+    2. The adaptive gain mechanism, which may make rate control harder.
+    3. The online moving teacher, which may add instability to the DSAD arm
+       but cannot explain failure of the NoDSAD control.
+
+These causes must be isolated rather than changed simultaneously.
+
+
+12. OTHER TECHNICAL FAILURES AND RESOLUTIONS
+--------------------------------------------
+
+12.1 Model-state hashing crash
+
+The first two-GPU beta screen stopped before training with:
+
+    RuntimeError:
+    self.dim() cannot be 0 to view Long as Byte (different element sizes)
+
+Cause:
+
+    hash_model_state attempted to reinterpret a scalar integer state buffer
+    using tensor.view(torch.uint8).
+
+Resolution:
+
+    Scalar and non-floating model-state buffers were serialised safely before
+    hashing. The fix was committed as:
+
+        9b1a41d - Fix scalar buffers in model state hashing
+
+The calibration was then restarted successfully.
+
+12.2 NVML mismatch
+
+nvidia-smi failed with:
+
+    Failed to initialize NVML: Driver/library version mismatch
+
+Resolution:
+
+    Direct PyTorch CUDA tests verified both permitted A6000 GPUs independently.
+    NVML monitoring remained unavailable, but CUDA training was operational.
+
+12.3 Framework warnings
+
+Warnings were observed for:
+
+    1. torch.meshgrid not explicitly receiving indexing;
+    2. torchvision's deprecated pretrained argument; and
+    3. NVML initialisation.
+
+These warnings did not terminate training or explain the multi-rate control
+failure. They should nevertheless be cleaned before a final reproducibility
+release.
+
+
+13. BASELINE-RESCUE IMPLEMENTATION
+----------------------------------
+
+The training protocol was revised and committed to branch final:
+
+    c463640 - Stabilize RD training and gate control curves
+
+The complete PyTorch/CompressAI continuous-integration workflow passed.
+
+The changes are:
+
+    1. deterministic cosine learning-rate decay;
+    2. separate configurable minimum main and auxiliary learning rates;
+    3. best validation-RD checkpoint restoration before entropy-table update
+       and actual-bitstream evaluation;
+    4. checkpoint selection metadata stored for every run;
+    5. checkpoint eligibility begins only after the DSAD beta warm-up/ramp for
+       paired causal studies;
+    6. learning rate and checkpoint-selection state logged each epoch;
+    7. a validation-only four-point monotonicity gate;
+    8. explicit rejection of unlocked test studies by the gate; and
+    9. epoch-by-epoch reconstruction previews retained.
+
+The next experiment is deliberately control-only:
+
+    variant:       Full_ATIC_NoDSAD
+    seed:          42
+    lambdas:       0.0018, 0.0035, 0.0067, 0.013
+    epochs:        120
+    batch size:    4
+    main LR:       1e-4 -> 1e-6 cosine decay
+    auxiliary LR:  1e-3 -> 1e-5 cosine decay
+    checkpoint:    lowest eligible validation RD loss
+    test sequence: locked
+
+The DSAD beta argument remains 8 only to define the checkpoint-eligibility
+window that will later be shared by the paired beta = 8 experiment.
+Full_ATIC_NoDSAD still trains with effective beta = 0.
+
+Gate condition:
+
+    At least four validation points must exist, and both actual BPP and PSNR
+    must be non-decreasing as lambda_rd increases.
+
+
+14. DECISION AFTER THE BASELINE-RESCUE RUN
+------------------------------------------
+
+If the control gate passes:
+
+    1. train the matched Full_ATIC_DSAD arm with the same stable protocol;
+    2. calculate validation BD-rate;
+    3. repeat the complete paired experiment across at least three seeds;
+    4. require consistent actual-rate improvement or perceptual improvement at
+       matched actual BPP; and
+    5. unlock Beauty only after architecture and hyperparameters are frozen.
+
+If the control gate fails:
+
+    1. do not run more DSAD seeds;
+    2. compare No_AdaptiveQuant with Full_ATIC_NoDSAD to isolate the adaptive
+       gain mechanism;
+    3. if needed, replace SAG BatchNorm with batch-independent normalisation in
+       a separately labelled ablation;
+    4. re-establish a monotonic control curve; and
+    5. only then return to the DSAD comparison.
+
+
+15. CLAIMS CURRENTLY SUPPORTED
+------------------------------
+
+The dissertation may currently state that:
+
+    1. a decoder-synchronised attention distillation mechanism was designed
+       and implemented;
+    2. the student gain map is reproducible from decoded z_hat and shared
+       decoder weights, with no separately transmitted attention map;
+    3. the encoder-only teacher is detached from the DSAD target path and is
+       not required by the operational decoder;
+    4. real entropy-coded bitstreams and actual complete-file BPP were used;
+    5. deterministic forward/stream equivalence was verified;
+    6. a frozen sequence-disjoint validation protocol was established;
+    7. beta = 8 produced encouraging single-rate validation improvements in
+       PSNR and LPIPS across three seeds; and
+    8. the multi-rate experiment revealed an unstable baseline and therefore
+       invalidated BD-rate calculation.
+
+The negative result is useful: it prevented a misleading claim based on a
+single rate point and identified baseline convergence as a prerequisite for a
+valid DSAD evaluation.
+
+
+16. CLAIMS NOT CURRENTLY SUPPORTED
+----------------------------------
+
+The dissertation must not yet claim that:
+
+    1. DSAD reduces BD-rate;
+    2. DSAD improves compression efficiency;
+    3. DSAD beats a state-of-the-art codec;
+    4. the method generalises to independent test data;
+    5. beta = 8 is statistically optimal;
+    6. DSAD improvements are statistically significant;
+    7. the adaptive gain architecture is stable; or
+    8. the complete method is publication-ready.
+
+These claims require a monotonic baseline, matched multi-rate curves, multiple
+seeds, independent test evaluation, and comparison with strong external
+baselines.
+
+
+17. MAJOR RESULT ARTIFACTS
+--------------------------
+
+Integration pilot:
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/dsad_pilot/
+    bosphorous_dsad_pilot_20260725_163501
+
+Beta calibration:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    dsad_beta_calibration/screen_20260725_190809_070372
+
+Three-seed confirmation:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    dsad_beta8_confirmation/
+    beta8_confirm_gpu0_seeds42_999_20260725_193525
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    dsad_beta8_confirmation/
+    beta8_confirm_gpu1_seed123_20260725_193540
+
+Multi-rate extension:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    dsad_beta8_multirate_extension/
+    beta8_multirate_gpu0_seeds42_999_20260726_033340
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    dsad_beta8_multirate_extension/
+    beta8_multirate_gpu1_seed123_20260726_033821
+
+Combined confirmation analysis:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    dsad_beta8_confirmation/confirmation_analysis.json
+
+Combined multi-rate analysis:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    dsad_beta8_multirate_extension/multirate_bd_analysis.json
+
+
+18. THESIS-READY INTERIM RESULTS PARAGRAPH
+------------------------------------------
+
+A decoder-synchronised attention distillation mechanism was implemented to
+transfer an encoder-derived spatial importance signal into a deployable
+decoder-side gain predictor. Unlike an explicitly transmitted attention map,
+the proposed student is generated from the decoded hyperlatent and shared
+decoder weights. Exact equality was observed for the repeated bitstream,
+decoded hyperlatent, gain map, and primary latent, while the final
+reconstruction agreed within a maximum floating-point difference of
+1.79 x 10^-7. A sequence-disjoint UVG-derived protocol was frozen using
+Bosphorus, HoneyBee, and YachtRide for training, ShakeNDry for validation, and
+Beauty as a locked independent test sequence. In a three-seed validation
+experiment at lambda_rd = 0.0067, beta = 8 improved PSNR and LPIPS in all
+three seeds, with mean changes of +0.977 dB and -0.0586 respectively.
+However, actual BPP increased by a mean of 0.193, so this single-rate result
+did not establish improved compression efficiency. A subsequent four-rate
+study produced non-monotonic RD points for both the distilled model and its
+identical-backbone control, invalidating BD-rate calculation in all three
+seeds. The failure of the control indicated insufficient baseline
+optimisation rather than a DSAD-specific conclusion. Consequently, independent
+test evaluation remained locked and the training protocol was revised to use
+longer optimisation, cosine learning-rate decay, and validation-RD checkpoint
+selection before repeating the causal comparison.
+
+
+END OF RECORD
+=============
