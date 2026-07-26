@@ -46,6 +46,7 @@ HISTORICAL_VARIANTS = (
     "No_Overlap",
     "No_CBAM",
     "No_AdaptiveQuant",
+    "No_AdaptiveQuant_GroupNormSAG",
     "Full_ATIC",
 )
 
@@ -82,6 +83,14 @@ ABLATION_VARIANTS = {
         use_overlapping_patches=True,
         use_sag=True,
         use_cbam=True,
+        use_adaptive_quant=False,
+        use_hyperprior=True,
+    ),
+    "No_AdaptiveQuant_GroupNormSAG": ArchitectureConfig(
+        use_overlapping_patches=True,
+        use_sag=True,
+        use_cbam=True,
+        sag_normalization="group",
         use_adaptive_quant=False,
         use_hyperprior=True,
     ),

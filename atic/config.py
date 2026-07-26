@@ -29,6 +29,9 @@ class ArchitectureConfig:
     # Attention stack inside each Swin block
     use_sag: bool = True       # Spatial Attention Gate
     use_cbam: bool = True      # CBAM channel attention
+    # "batch" preserves archived checkpoints. "group" is the separately
+    # labelled small-batch stability ablation and is batch-independent.
+    sag_normalization: str = "batch"
 
     # Block 3: Quantizer
     use_adaptive_quant: bool = True   # False = uniform quantisation

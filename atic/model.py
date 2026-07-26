@@ -71,6 +71,10 @@ class ATICModel(CompressionModel):
             raise ValueError("ATIC token_dim must be a positive integer")
         if not isinstance(config.window_size, int) or config.window_size <= 0:
             raise ValueError("ATIC window_size must be a positive integer")
+        if config.sag_normalization not in {"batch", "group"}:
+            raise ValueError(
+                "ATIC sag_normalization must be 'batch' or 'group'"
+            )
         if any(
             not isinstance(depth, int) or depth <= 0 or depth % 2 != 0
             for depth in config.depths
@@ -135,6 +139,7 @@ class ATICModel(CompressionModel):
             window_size=config.window_size,
             use_sag=config.use_sag,
             use_cbam=config.use_cbam,
+            sag_normalization=config.sag_normalization,
         )
 
         # CompressAI entropy model.
@@ -155,6 +160,7 @@ class ATICModel(CompressionModel):
             window_size=config.window_size,
             use_sag=config.use_sag,
             use_cbam=config.use_cbam,
+            sag_normalization=config.sag_normalization,
         )
 
         self.reconstructor = OverlappingPatchReconstructor(

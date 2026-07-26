@@ -627,6 +627,49 @@ The control gate failed. Therefore:
     5. only after a monotonic control is established can the matched DSAD arm
        and validation BD-rate study resume.
 
+No-adaptive-gain diagnostic results:
+
+    variant: No_AdaptiveQuant
+    seed:    42
+    epochs:  120
+
+    lambda   actual BPP   PSNR (dB)   best/final epoch   final RD above best
+    -------------------------------------------------------------------------
+    0.0018    0.039240       8.509          30/120             +235.06%
+    0.0035    0.349677      17.335         120/120               +0.00%
+    0.0067    0.407111      18.082         106/120               +4.52%
+    0.0130    0.311108      17.825         119/120               +2.22%
+
+Outcome:
+
+    actual BPP monotonic: false
+    PSNR monotonic:       false
+    overall gate:         fail
+    Beauty evaluated:     no
+
+Removing adaptive gain did not restore monotonicity. It produced a severe
+low-lambda collapse at lambda = 0.0018, and lambda = 0.013 used fewer bits and
+lower PSNR than lambda = 0.0067. Adaptive gain is therefore not the sole root
+cause.
+
+The 0.0018 result selected epoch 30 even though the newly aligned beta = 8
+eligibility window should begin at epoch 36 for a 120-epoch run. This is an
+audit warning that the remote study may have started from the preceding
+commit/configuration. Because the experiment failed, it is retained only as
+diagnostic evidence and not as a positive causal result. The next run must
+hard-check the required commit before training.
+
+The next isolated variant is:
+
+    No_AdaptiveQuant_GroupNormSAG
+
+It is identical to No_AdaptiveQuant except that SAG BatchNorm is replaced by
+batch-independent GroupNorm. Archived BatchNorm variants and checkpoints keep
+their original configuration and state-dict keys. If the GroupNorm curve
+becomes monotonic, SAG running population statistics are implicated. If it
+still fails, the next gate removes SAG entirely and then tests the plain
+hyperprior baseline.
+
 
 15. CLAIMS CURRENTLY SUPPORTED
 ------------------------------
@@ -647,7 +690,9 @@ The dissertation may currently state that:
     8. the multi-rate experiment revealed an unstable baseline and therefore
        invalidated BD-rate calculation; and
     9. longer scheduled training and best-checkpoint restoration reduced the
-       instability but did not restore monotonic rate control.
+       instability but did not restore monotonic rate control; and
+   10. disabling adaptive gain did not eliminate the instability, motivating
+       a separately labelled batch-independent SAG normalisation ablation.
 
 The negative result is useful: it prevented a misleading claim based on a
 single rate point and identified baseline convergence as a prerequisite for a
@@ -729,6 +774,19 @@ Baseline-rescue analysis:
     /home/250399192/ATIC---dissertation/ablation_results/
     baseline_rescue/baseline_rescue_analysis.json
 
+No-adaptive-gain studies:
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    no_adaptive_gain_gate/no_adaptive_gain_gpu0_20260726_080252
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    no_adaptive_gain_gate/no_adaptive_gain_gpu1_20260726_080308
+
+No-adaptive-gain analysis:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    no_adaptive_gain_gate/no_adaptive_gain_analysis.json
+
 
 18. THESIS-READY INTERIM RESULTS PARAGRAPH
 ------------------------------------------
@@ -758,7 +816,10 @@ confirmed that final-epoch selection was unsafe, but actual BPP and PSNR
 remained non-monotonic. Estimated and coded rates showed the same ordering,
 while header BPP was constant, locating the remaining problem in model-level
 rate control rather than container overhead or entropy-coder accounting. The
-next controlled ablation therefore removes only the adaptive gain mechanism
+next controlled ablation removed only the adaptive gain mechanism, but its
+four-rate curve also failed and showed a severe low-lambda collapse.
+Consequently, adaptive gain was rejected as the sole cause. The subsequent
+isolated experiment replaces SAG BatchNorm with batch-independent GroupNorm
 before any further DSAD or independent-test experiment.
 
 

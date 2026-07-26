@@ -67,6 +67,24 @@ class ATICCodecRoundTripTests(unittest.TestCase):
         model.update(force=True)
         return model
 
+    def test_groupnorm_sag_configuration_reaches_full_model(self):
+        config = small_config()
+        config.sag_normalization = "group"
+        model = ATICModel(config, H=64, W=64)
+
+        self.assertTrue(
+            any(
+                isinstance(module, torch.nn.GroupNorm)
+                for module in model.modules()
+            )
+        )
+        self.assertFalse(
+            any(
+                isinstance(module, torch.nn.BatchNorm2d)
+                for module in model.modules()
+            )
+        )
+
     def assert_entropy_diagnostics_equal(self, sender, receiver):
         for name in ("z_symbols", "y_symbols", "indexes"):
             sender_tensor = sender[name].detach().cpu()

@@ -94,6 +94,7 @@ class DecoderBlock(nn.Module):
         window_size: int = 8,
         use_sag: bool = True,
         use_cbam: bool = True,
+        sag_normalization: str = "batch",
         upsample: bool = True,
         use_skip: bool = False,
     ):
@@ -124,7 +125,12 @@ class DecoderBlock(nn.Module):
         self.padded_resolution = (self.target_resolution[0] + pad_H, self.target_resolution[1] + pad_W)
 
         self.swin    = SwinStage(out_dim, self.padded_resolution, depth, num_heads, window_size)
-        self.attn    = AttentionStack(out_dim, use_sag=use_sag, use_cbam=use_cbam)
+        self.attn = AttentionStack(
+            out_dim,
+            use_sag=use_sag,
+            use_cbam=use_cbam,
+            sag_normalization=sag_normalization,
+        )
 
     def forward(
         self,
@@ -198,6 +204,7 @@ class SwinDecoder(nn.Module):
         window_size: int = 8,
         use_sag: bool = True,
         use_cbam: bool = True,
+        sag_normalization: str = "batch",
         use_skip: bool = False,
     ):
         super().__init__()
@@ -237,6 +244,7 @@ class SwinDecoder(nn.Module):
                 window_size=window_size,
                 use_sag=use_sag,
                 use_cbam=use_cbam,
+                sag_normalization=sag_normalization,
                 upsample=(i < 3),
                 use_skip=use_skip,
             )

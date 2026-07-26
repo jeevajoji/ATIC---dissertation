@@ -19,9 +19,11 @@ Both are gating mechanisms: they re-weight features rather than transform
 them, which keeps gradients stable and the modules lightweight.
 """
 
+import math
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
 
 
 class SpatialAttentionGate(nn.Module):
@@ -39,20 +41,40 @@ class SpatialAttentionGate(nn.Module):
     Args:
         in_channels : number of input feature channels
         reduction   : channel compression ratio (default 8)
+        normalization: batch or batch-independent group normalisation
     """
 
-    def __init__(self, in_channels: int, reduction: int = 8):
+    VALID_NORMALIZATIONS = {"batch", "group"}
+
+    def __init__(
+        self,
+        in_channels: int,
+        reduction: int = 8,
+        normalization: str = "batch",
+    ):
         super().__init__()
 
+        if normalization not in self.VALID_NORMALIZATIONS:
+            raise ValueError(
+                "SAG normalization must be one of "
+                f"{sorted(self.VALID_NORMALIZATIONS)}"
+            )
         mid = max(in_channels // reduction, 8)  # at least 8 channels
+        self.normalization = normalization
 
         # 1×1 conv: cheap channel compression before the expensive 7×7
         self.compress = nn.Conv2d(in_channels, mid, kernel_size=1, bias=False)
-        self.bn1      = nn.BatchNorm2d(mid)
 
         # 7×7 conv: padding=3 preserves spatial size
         self.attend   = nn.Conv2d(mid, 1, kernel_size=7, padding=3, bias=False)
-        self.bn2      = nn.BatchNorm2d(1)
+        # Preserve the historical bn1/bn2 attribute names so archived
+        # BatchNorm checkpoints retain their exact state-dict keys.
+        if normalization == "batch":
+            self.bn1 = nn.BatchNorm2d(mid)
+            self.bn2 = nn.BatchNorm2d(1)
+        else:
+            self.bn1 = nn.GroupNorm(math.gcd(mid, 8), mid)
+            self.bn2 = nn.GroupNorm(1, 1)
 
         self.relu    = nn.ReLU(inplace=True)
         self.sigmoid = nn.Sigmoid()
@@ -138,6 +160,7 @@ class AttentionStack(nn.Module):
         in_channels : channel dimension at this stage
         use_sag     : enable Spatial Attention Gate
         use_cbam    : enable CBAM channel attention
+        sag_normalization: batch or batch-independent group normalisation
     """
 
     def __init__(
@@ -145,12 +168,20 @@ class AttentionStack(nn.Module):
         in_channels: int,
         use_sag: bool  = True,
         use_cbam: bool = True,
+        sag_normalization: str = "batch",
     ):
         super().__init__()
 
         self.use_sag  = use_sag
         self.use_cbam = use_cbam
-        self.sag      = SpatialAttentionGate(in_channels)  if use_sag  else None
+        self.sag = (
+            SpatialAttentionGate(
+                in_channels,
+                normalization=sag_normalization,
+            )
+            if use_sag
+            else None
+        )
         self.cbam     = ChannelAttentionCBAM(in_channels)  if use_cbam else None
 
     def forward(

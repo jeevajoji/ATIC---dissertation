@@ -160,6 +160,7 @@ class EncoderBlock(nn.Module):
         window_size: int = 8,
         use_sag: bool = True,
         use_cbam: bool = True,
+        sag_normalization: str = "batch",
         downsample: bool = True,
     ):
         super().__init__()
@@ -172,7 +173,12 @@ class EncoderBlock(nn.Module):
         self.padded_resolution = (self.H + pad_H, self.W + pad_W)
 
         self.swin    = SwinStage(dim, self.padded_resolution, depth, num_heads, window_size)
-        self.attn    = AttentionStack(dim, use_sag=use_sag, use_cbam=use_cbam)  
+        self.attn = AttentionStack(
+            dim,
+            use_sag=use_sag,
+            use_cbam=use_cbam,
+            sag_normalization=sag_normalization,
+        )
         self.merge   = PatchMerging2D(dim) if downsample else None
         self.out_dim = dim * 2 if downsample else dim
 
@@ -246,6 +252,7 @@ class SwinEncoder(nn.Module):
         window_size: int = 8,
         use_sag: bool = True,
         use_cbam: bool = True,
+        sag_normalization: str = "batch",
     ):
         super().__init__()
 
@@ -270,6 +277,7 @@ class SwinEncoder(nn.Module):
                 window_size=window_size,
                 use_sag=use_sag,
                 use_cbam=use_cbam,
+                sag_normalization=sag_normalization,
                 downsample=(i < 3),   # no downsampling after stage 4
             )
             for i in range(4)

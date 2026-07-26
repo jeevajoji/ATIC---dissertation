@@ -42,11 +42,13 @@ did not cause the reversal.
 
 Do not unlock Beauty, calculate publication BD-rate, tune DSAD further, or
 claim compression novelty until a control produces a monotonic validation RD
-curve. The current gate disables only adaptive gain using No_AdaptiveQuant
-while retaining SAG, CBAM, hyperprior, data, seed, optimiser, 120 epochs, and
-the matched checkpoint-selection window. If that gate also fails, replace the
-small-batch BatchNorm layers in SAG with batch-independent normalisation in a
-separately labelled architecture ablation. Only one cause changes at a time.
+curve. Disabling adaptive gain with No_AdaptiveQuant also failed, including a
+severe low-lambda collapse, so adaptive gain is not the sole cause. The current
+gate uses No_AdaptiveQuant_GroupNormSAG: it retains SAG, CBAM, hyperprior,
+data, seed, optimiser, 120 epochs, and the matched checkpoint-selection window
+but replaces only SAG BatchNorm with batch-independent GroupNorm. If that gate
+also fails, remove SAG entirely and then test the plain hyperprior baseline.
+Only one cause changes at a time.
 
 The causal DSAD comparison changes only beta_max:
 

@@ -49,6 +49,21 @@ class DSADAblationConfigurationTests(unittest.TestCase):
         self.assertTrue(full["use_adaptive_quant"])
         self.assertFalse(no_gain["use_adaptive_quant"])
 
+    def test_groupnorm_sag_variant_changes_only_sag_normalization(self):
+        batch = asdict(ABLATION_VARIANTS["No_AdaptiveQuant"])
+        group = asdict(
+            ABLATION_VARIANTS["No_AdaptiveQuant_GroupNormSAG"]
+        )
+        differences = {
+            key
+            for key in batch
+            if batch[key] != group[key]
+        }
+
+        self.assertEqual(differences, {"sag_normalization"})
+        self.assertEqual(batch["sag_normalization"], "batch")
+        self.assertEqual(group["sag_normalization"], "group")
+
     def test_only_dsad_arm_receives_nonzero_beta(self):
         no_dsad = _dsad_settings_for_variant(
             "Full_ATIC_NoDSAD",
