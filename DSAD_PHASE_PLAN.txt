@@ -157,6 +157,23 @@ lower-bounds scales at 0.11, this is not a coder-validity defect. Before
 changing the entropy scale head or optimiser, compare training and validation
 trajectories to distinguish overfitting from collapse on both splits.
 
+The trajectory comparison found both:
+
+1. control-low, control-high, and no-norm-low improved training RD while
+   validation RD worsened, establishing sequence/domain overfitting; and
+2. no-norm-high worsened by +0.3346 training RD and +32.2054 validation RD,
+   establishing optimisation/entropy collapse on both splits.
+
+All final training MSE values converged near 0.05048 independently of lambda.
+The next ordered actions are therefore:
+
+1. a high-rate no-norm gradient-clipping calibration on the current frozen
+   training/validation protocol; then
+2. a new, larger and content-diverse sequence-disjoint training corpus after
+   optimizer stability is established.
+
+Do not resume multi-rate DSAD training or unlock Beauty before both gates pass.
+
 The causal DSAD comparison changes only beta_max:
 
     Full_ATIC_NoDSAD: beta_max = 0

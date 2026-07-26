@@ -1130,9 +1130,28 @@ collapse.
 The below-0.11 statistic describes the raw hyper-synthesis prediction, not an
 invalid entropy-coder scale: CompressAI's GaussianConditional applies its own
 0.11 lower bound for both likelihood calculation and coding-index creation.
-Therefore the next diagnostic must compare training and validation RD,
-distortion, rate, and occupancy trajectories before changing the scale
-parameterisation or optimiser.
+Training-versus-validation trajectories then separated two effects:
+
+    arm/rate       final - selected train RD   final - selected val RD
+    control low                    -0.0428                    +0.6890
+    control high                   -0.3973                    +7.5995
+    no-norm low                    -0.0370                    +0.7310
+    no-norm high                   +0.3346                   +32.2054
+
+The first three models improved on their training objective while validation
+deteriorated, demonstrating sequence/domain overfitting. The high-rate no-norm
+model deteriorated on both splits, demonstrating genuine optimisation/entropy
+collapse in addition to the domain gap. By epoch 60, all four training MSE
+values had converged to approximately 0.05048 despite the seven-fold lambda
+difference. The higher lambda therefore failed to sustain a distinct
+high-quality solution even on the training sequences.
+
+The next work must proceed in two ordered stages. First, calibrate main-gradient
+clipping on the high-rate no-norm model, where every batch was clipped and the
+useful entropy regime collapsed on both splits. Second, after choosing a stable
+optimizer setting, replace the 360 highly correlated training frames with a
+larger, content-diverse, sequence-disjoint training corpus. A new multi-rate
+or DSAD study before both stages would remain uninterpretable.
 
 
 15. CLAIMS CURRENTLY SUPPORTED
