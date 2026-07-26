@@ -1,8 +1,9 @@
-"""Audit validation RD histories and enforce a monotonic control-curve gate."""
+"""Audit selected validation checkpoints and enforce a monotonic RD gate."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -47,9 +48,10 @@ def _csv_ints(value: str) -> List[int]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Merge validation-only ablation studies, audit best-versus-final "
-            "training histories, and require non-decreasing actual BPP and "
-            "PSNR as lambda_rd increases."
+            "Merge validation-only ablation studies, audit selected-versus-"
+            "final training histories using the checkpoint-eligibility "
+            "window, and require non-decreasing actual BPP and PSNR as "
+            "lambda_rd increases."
         )
     )
     parser.add_argument("studies", nargs="+", type=Path)
@@ -88,6 +90,9 @@ def _load_history(run_dir: Path) -> List[Dict[str, object]]:
 
 def _history_audit(
     records: Sequence[Dict[str, object]],
+    *,
+    selected_epoch: int | None = None,
+    selection_strategy: str = "best_val_rd",
 ) -> Dict[str, object]:
     candidates = [
         record
@@ -99,17 +104,133 @@ def _history_audit(
         raise RuntimeError("training history has no finite val_rd_loss")
     best = min(candidates, key=lambda record: float(record["val_rd_loss"]))
     final = candidates[-1]
+    eligibility_logged = any(
+        "checkpoint_selection_eligible" in record
+        for record in candidates
+    )
+    eligible = [
+        record
+        for record in candidates
+        if record.get("checkpoint_selection_eligible") is True
+    ]
+    if not eligible and all(
+        "checkpoint_selection_eligible" not in record
+        for record in candidates
+    ):
+        # Compatibility with histories created before eligibility was logged.
+        eligible = list(candidates)
+    best_eligible = (
+        min(eligible, key=lambda record: float(record["val_rd_loss"]))
+        if eligible
+        else None
+    )
+    if selected_epoch is None:
+        selected = best_eligible if best_eligible is not None else best
+    else:
+        selected_matches = [
+            record
+            for record in candidates
+            if int(record["epoch"]) == int(selected_epoch)
+        ]
+        if len(selected_matches) != 1:
+            raise RuntimeError(
+                "reported selected_epoch is absent or duplicated in "
+                f"training history: {selected_epoch}"
+            )
+        selected = selected_matches[0]
+        if (
+            selection_strategy == "best_val_rd"
+            and eligibility_logged
+            and best_eligible is None
+        ):
+            raise RuntimeError(
+                "best validation-RD strategy has no eligible checkpoint"
+            )
+        if selection_strategy == "best_val_rd" and best_eligible is not None:
+            if (
+                eligibility_logged
+                and selected.get("checkpoint_selection_eligible") is not True
+            ):
+                raise RuntimeError(
+                    f"reported selected_epoch is ineligible: {selected_epoch}"
+                )
+            if int(selected["epoch"]) != int(best_eligible["epoch"]):
+                raise RuntimeError(
+                    "reported selected_epoch is not the minimum-RD eligible "
+                    f"checkpoint: reported {selected_epoch}, expected "
+                    f"{int(best_eligible['epoch'])}"
+                )
+        elif (
+            selection_strategy == "final"
+            and int(selected["epoch"]) != int(final["epoch"])
+        ):
+            raise RuntimeError(
+                "final checkpoint strategy did not select the final epoch"
+            )
+        elif selection_strategy not in {"best_val_rd", "final"}:
+            raise RuntimeError(
+                f"unknown checkpoint selection strategy: {selection_strategy}"
+            )
+
     best_value = float(best["val_rd_loss"])
+    selected_value = float(selected["val_rd_loss"])
     final_value = float(final["val_rd_loss"])
     return {
         "best_epoch_any": int(best["epoch"]),
         "best_val_rd_loss_any": best_value,
+        "best_epoch_eligible": (
+            None if best_eligible is None else int(best_eligible["epoch"])
+        ),
+        "best_val_rd_loss_eligible": (
+            None
+            if best_eligible is None
+            else float(best_eligible["val_rd_loss"])
+        ),
+        "selected_epoch": int(selected["epoch"]),
+        "selected_val_rd_loss": selected_value,
+        "selected_val_total_bpp": (
+            None
+            if selected.get("val_total_bpp") is None
+            else float(selected["val_total_bpp"])
+        ),
+        "selected_val_mse_loss": (
+            None
+            if selected.get("val_mse_loss") is None
+            else float(selected["val_mse_loss"])
+        ),
+        "selected_val_psnr_from_mse": (
+            None
+            if selected.get("val_mse_loss") is None
+            or float(selected["val_mse_loss"]) <= 0
+            else -10.0 * math.log10(float(selected["val_mse_loss"]))
+        ),
+        "selected_main_grad_norm": (
+            None
+            if selected.get("main_grad_norm") is None
+            else float(selected["main_grad_norm"])
+        ),
+        "selected_main_grad_clip_fraction": (
+            None
+            if selected.get("main_grad_clip_fraction") is None
+            else float(selected["main_grad_clip_fraction"])
+        ),
+        "selected_aux_grad_norm": (
+            None
+            if selected.get("aux_grad_norm") is None
+            else float(selected["aux_grad_norm"])
+        ),
         "final_epoch": int(final["epoch"]),
         "final_val_rd_loss": final_value,
         "final_minus_best_val_rd_loss": final_value - best_value,
         "final_over_best_percent": (
             100.0 * (final_value / best_value - 1.0)
             if best_value != 0
+            else None
+        ),
+        "final_minus_selected_val_rd_loss": final_value - selected_value,
+        "final_over_selected_percent": (
+            100.0 * (final_value / selected_value - 1.0)
+            if selected_value != 0
             else None
         ),
         "final_aux_loss": (
@@ -120,10 +241,171 @@ def _history_audit(
     }
 
 
+def _load_run_provenance(
+    *,
+    study_config: Dict[str, object],
+    run_dir: Path,
+    source: Dict[str, object],
+    variant: str,
+) -> Tuple[Dict[str, object], str]:
+    """Load the causal controls needed to compare independently run rates."""
+
+    run_config = _read_json(run_dir / "run_config.json")
+    initial_state = _read_json(run_dir / "initial_state.json")
+    run_environment = _read_json(run_dir / "environment.json")
+
+    expected_run_fields = {
+        "variant": variant,
+        "seed": int(source["seed"]),
+        "lambda_rd": float(source["lambda_rd"]),
+        "evaluation_split": "val",
+    }
+    for name, expected in expected_run_fields.items():
+        observed = run_config.get(name)
+        if observed != expected:
+            raise RuntimeError(
+                f"{run_dir}: run_config {name}={observed!r}, "
+                f"expected {expected!r}"
+            )
+
+    initial_sha256 = str(initial_state.get("sha256", ""))
+    if (
+        not initial_sha256
+        or initial_sha256 != str(source.get("initial_state_sha256", ""))
+        or int(initial_state.get("seed", -1)) != int(source["seed"])
+        or initial_state.get("variant") != variant
+    ):
+        raise RuntimeError(f"{run_dir}: initial-state identity mismatch")
+
+    git = run_environment.get("git")
+    if (
+        not isinstance(git, dict)
+        or not git.get("commit")
+        or git.get("is_dirty") is not False
+    ):
+        raise RuntimeError(
+            f"{run_dir}: publication diagnostic requires a clean Git commit"
+        )
+    dependency_versions = run_environment.get("dependency_versions")
+    if (
+        not isinstance(dependency_versions, dict)
+        or any(
+            not dependency_versions.get(name)
+            for name in ("compressai", "numpy", "pillow", "timm", "torchvision")
+        )
+    ):
+        raise RuntimeError(
+            f"{run_dir}: dependency-version provenance is incomplete"
+        )
+    if study_config.get("frozen_split_verified") is not True:
+        raise RuntimeError(
+            f"{run_dir}: rate-response diagnostic requires a frozen split"
+        )
+    if study_config.get("evaluation_split") != "val":
+        raise RuntimeError(
+            f"{run_dir}: rate-response diagnostic requires validation only"
+        )
+
+    variants = study_config.get("variants")
+    variant_config = (
+        variants.get(variant) if isinstance(variants, dict) else None
+    )
+    if not isinstance(variant_config, dict):
+        raise RuntimeError(f"{run_dir}: missing study variant configuration")
+    if run_config.get("architecture") != variant_config.get("architecture"):
+        raise RuntimeError(f"{run_dir}: study/run architecture mismatch")
+    if run_config.get("dsad") != variant_config.get("dsad"):
+        raise RuntimeError(f"{run_dir}: study/run DSAD configuration mismatch")
+    training_controls = run_config.get("training_controls")
+    if (
+        not isinstance(training_controls, dict)
+        or training_controls.get("checkpoint_selection") != "best_val_rd"
+        or training_controls.get("checkpoint_selection_start_epoch") != 1
+        or source.get("checkpoint_selection")
+        != training_controls.get("checkpoint_selection")
+    ):
+        raise RuntimeError(
+            f"{run_dir}: sanity gate requires best validation-RD selection "
+            "from epoch 1"
+        )
+    study_training_controls = study_config.get("training_controls")
+    if (
+        not isinstance(study_training_controls, dict)
+        or any(
+            study_training_controls.get(name) != value
+            for name, value in training_controls.items()
+        )
+    ):
+        raise RuntimeError(f"{run_dir}: study/run training controls mismatch")
+    if (
+        run_config.get("epochs") != study_config.get("epochs")
+        or run_config.get("batch_size") != study_config.get("batch_size")
+        or run_config.get("data_protocol")
+        != study_config.get("data_protocol")
+    ):
+        raise RuntimeError(f"{run_dir}: study/run protocol mismatch")
+
+    manifests = study_config.get("manifests")
+    if not isinstance(manifests, dict) or not manifests.get("bundle_id"):
+        raise RuntimeError(f"{run_dir}: missing frozen manifest identity")
+    if (
+        run_config.get("frozen_bundle_id") != manifests.get("bundle_id")
+        or source.get("frozen_bundle_id") != manifests.get("bundle_id")
+        or source.get("data_protocol") != study_config.get("data_protocol")
+    ):
+        raise RuntimeError(f"{run_dir}: frozen bundle identity mismatch")
+
+    provenance: Dict[str, object] = {
+        "git": {
+            "commit": str(git["commit"]),
+            "is_dirty": False,
+        },
+        "software": {
+            name: run_environment.get(name)
+            for name in (
+                "python_version",
+                "torch_version",
+                "dependency_versions",
+                "cuda_version",
+                "cudnn_version",
+                "deterministic_algorithms_enabled",
+                "gpu_name",
+            )
+        },
+        "data": {
+            "data_protocol": study_config.get("data_protocol"),
+            "frozen_split_verified": True,
+            "bundle_id": manifests.get("bundle_id"),
+            "dataset_id": manifests.get("dataset_id"),
+            "hashes": manifests.get("hashes"),
+            "split_counts": study_config.get("split_counts"),
+        },
+        "run": {
+            "variant": variant,
+            "architecture": run_config.get("architecture"),
+            "initial_state_sha256": initial_sha256,
+            "seed": int(source["seed"]),
+            "epochs": run_config.get("epochs"),
+            "batch_size": run_config.get("batch_size"),
+            "height": run_config.get("height"),
+            "width": run_config.get("width"),
+            "training_controls": run_config.get("training_controls"),
+            "dsad": run_config.get("dsad"),
+        },
+    }
+    canonical = json.dumps(
+        provenance,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return provenance, hashlib.sha256(canonical).hexdigest()
+
+
 def load_rows(
     study_dirs: Iterable[Path],
     *,
     variant: str,
+    require_provenance: bool = False,
 ) -> List[Dict[str, object]]:
     indexed: Dict[Tuple[int, float], Dict[str, object]] = {}
     for study_dir in study_dirs:
@@ -167,7 +449,42 @@ def load_rows(
                     run_dir = checkpoint_run_dir
             row = dict(source)
             row["study_dir"] = str(study_dir)
-            row["history"] = _history_audit(_load_history(run_dir))
+            reported_selected_epoch = source.get("selected_epoch")
+            history = _history_audit(
+                _load_history(run_dir),
+                selected_epoch=(
+                    None
+                    if reported_selected_epoch is None
+                    else int(reported_selected_epoch)
+                ),
+                selection_strategy=str(
+                    source.get("checkpoint_selection", "best_val_rd")
+                ),
+            )
+            reported_selected_loss = source.get("selected_val_rd_loss")
+            if (
+                reported_selected_loss is not None
+                and not math.isclose(
+                    float(reported_selected_loss),
+                    float(history["selected_val_rd_loss"]),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise RuntimeError(
+                    "summary selected_val_rd_loss does not match training "
+                    f"history for seed={seed}, lambda={lambda_rd}"
+                )
+            row["history"] = history
+            if require_provenance:
+                provenance, provenance_sha256 = _load_run_provenance(
+                    study_config=config,
+                    run_dir=run_dir,
+                    source=source,
+                    variant=variant,
+                )
+                row["provenance"] = provenance
+                row["provenance_sha256"] = provenance_sha256
             indexed[key] = row
     if not indexed:
         raise RuntimeError(f"no rows found for variant {variant!r}")
@@ -249,12 +566,12 @@ def print_report(report: Dict[str, object]) -> None:
     for seed_report in report["seeds"]:
         print(f"\n=== seed {seed_report['seed']} ===")
         print(
-            "lambda    actual BPP/PSNR    best/final epoch    "
-            "final RD above best"
+            "lambda    actual BPP/PSNR    selected/final epoch    "
+            "final RD above selected"
         )
         for row in seed_report["points"]:
             history = row["history"]
-            excess = history["final_over_best_percent"]
+            excess = history["final_over_selected_percent"]
             excess_text = (
                 "n/a" if excess is None else f"{float(excess):+.2f}%"
             )
@@ -262,7 +579,7 @@ def print_report(report: Dict[str, object]) -> None:
                 f"{float(row['lambda_rd']):<9g} "
                 f"{float(row['BPP_actual']):.6f}/"
                 f"{float(row['PSNR']):.3f}       "
-                f"{int(history['best_epoch_any'])}/"
+                f"{int(history['selected_epoch'])}/"
                 f"{int(history['final_epoch'])}              "
                 f"{excess_text}"
             )

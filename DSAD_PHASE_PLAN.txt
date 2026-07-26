@@ -42,13 +42,31 @@ did not cause the reversal.
 
 Do not unlock Beauty, calculate publication BD-rate, tune DSAD further, or
 claim compression novelty until a control produces a monotonic validation RD
-curve. Disabling adaptive gain with No_AdaptiveQuant also failed, including a
-severe low-lambda collapse, so adaptive gain is not the sole cause. The current
-gate uses No_AdaptiveQuant_GroupNormSAG: it retains SAG, CBAM, hyperprior,
-data, seed, optimiser, 120 epochs, and the matched checkpoint-selection window
-but replaces only SAG BatchNorm with batch-independent GroupNorm. If that gate
-also fails, remove SAG entirely and then test the plain hyperprior baseline.
-Only one cause changes at a time.
+curve. Under the subsequently identified clipping confounder, disabling
+adaptive gain with No_AdaptiveQuant failed, including a severe low-lambda
+collapse. This observation cannot now isolate adaptive gain causally. Replacing
+SAG BatchNorm with GroupNorm also failed, but the later audit showed that
+GroupNorm(1, 1) imposed a strong one-channel spatial normalisation before every
+SAG sigmoid, so that intervention did not cleanly isolate BatchNorm either.
+
+The code audit found a definite optimiser-boundary defect: stale auxiliary
+entropy-quantile gradients were included in the following batch's global
+model-gradient clipping norm. The correction clears auxiliary gradients before
+the main backward pass, clips only main-optimiser parameters, clears auxiliary
+gradients after their update, and logs main/auxiliary gradient norms plus the
+main clipping fraction. All earlier long runs share this confounder.
+
+Do not use the archived Baseline for the trainer sanity gate because disabling
+overlap changes the 512x512 latent geometry from 8x8 to 4x4. Use the new
+Plain_Swin_Hyperprior variant: overlap and hyperprior remain enabled; SAG,
+CBAM, and adaptive gain are disabled.
+
+The next run is limited to seed 42, lambdas 0.0018 and 0.013, 60 epochs,
+batch size 4, cosine learning rates, DSAD beta 0, and validation-only real
+bitstreams. Pass requires the high-lambda arm to improve actual BPP by at
+least 0.01 and PSNR by at least 0.25 dB, with estimated BPP agreeing. If it
+fails, stop DSAD and test the official CompressAI MeanScaleHyperprior oracle,
+then isolate the encoder terminal latent LayerNorm. Beauty remains locked.
 
 The causal DSAD comparison changes only beta_max:
 

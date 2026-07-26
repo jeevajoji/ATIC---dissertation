@@ -43,6 +43,7 @@ def _full_atic_config() -> ArchitectureConfig:
 # readable. They are architecture ablations, not the controlled DSAD claim.
 HISTORICAL_VARIANTS = (
     "Baseline",
+    "Plain_Swin_Hyperprior",
     "No_Overlap",
     "No_CBAM",
     "No_AdaptiveQuant",
@@ -60,6 +61,17 @@ CAUSAL_DSAD_VARIANTS = (
 ABLATION_VARIANTS = {
     "Baseline": ArchitectureConfig(
         use_overlapping_patches=False,
+        use_sag=False,
+        use_cbam=False,
+        use_adaptive_quant=False,
+        use_hyperprior=True,
+    ),
+    # Internal trainer/rate-control sanity variant. Unlike the archived
+    # Baseline, this retains the full model's overlapping tokenizer and
+    # therefore its 8x8 latent geometry at 512x512. Only the attention gates
+    # and adaptive gain are absent.
+    "Plain_Swin_Hyperprior": ArchitectureConfig(
+        use_overlapping_patches=True,
         use_sag=False,
         use_cbam=False,
         use_adaptive_quant=False,
@@ -466,6 +478,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Minimum auxiliary LR reached by cosine decay.",
     )
     parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=float(_env_or_default("ATIC_GRAD_CLIP_NORM", "1.0")),
+        help=(
+            "Main-optimizer gradient norm limit. Auxiliary entropy "
+            "parameters are excluded; use 0 to disable clipping."
+        ),
+    )
+    parser.add_argument(
         "--checkpoint-selection",
         choices=("final", "best_val_rd"),
         default=_env_or_default(
@@ -602,6 +623,7 @@ def run_ablation_study(
     lr_schedule: str = "cosine",
     min_learning_rate: float = 1e-6,
     min_aux_learning_rate: float = 1e-5,
+    grad_clip_norm: float = 1.0,
     checkpoint_selection: str = "best_val_rd",
     dsad_beta_max: float = 0.05,
     dsad_warmup_fraction: float = 0.20,
@@ -660,6 +682,7 @@ def run_ablation_study(
         lr_schedule=lr_schedule,
         min_learning_rate=min_learning_rate,
         min_aux_learning_rate=min_aux_learning_rate,
+        grad_clip_norm=grad_clip_norm,
         checkpoint_selection=checkpoint_selection,
         checkpoint_selection_start_epoch=1,
         epochs=epochs,
@@ -814,6 +837,7 @@ def run_ablation_study(
                 "lr_schedule": lr_schedule,
                 "min_learning_rate": min_learning_rate,
                 "min_aux_learning_rate": min_aux_learning_rate,
+                "grad_clip_norm": grad_clip_norm,
                 "checkpoint_selection": checkpoint_selection,
                 "checkpoint_selection_start_epoch": (
                     checkpoint_selection_start_epoch
@@ -947,6 +971,7 @@ def run_ablation_study(
                             "lr_schedule": lr_schedule,
                             "min_learning_rate": min_learning_rate,
                             "min_aux_learning_rate": min_aux_learning_rate,
+                            "grad_clip_norm": grad_clip_norm,
                             "checkpoint_selection": checkpoint_selection,
                             "checkpoint_selection_start_epoch": (
                                 checkpoint_selection_start_epoch
@@ -1012,6 +1037,7 @@ def run_ablation_study(
                     lr_schedule=lr_schedule,
                     min_learning_rate=min_learning_rate,
                     min_aux_learning_rate=min_aux_learning_rate,
+                    grad_clip_norm=grad_clip_norm,
                     checkpoint_selection=checkpoint_selection,
                     checkpoint_selection_start_epoch=(
                         checkpoint_selection_start_epoch
@@ -1178,6 +1204,7 @@ if __name__ == "__main__":
         lr_schedule=args.lr_schedule,
         min_learning_rate=args.min_learning_rate,
         min_aux_learning_rate=args.min_aux_learning_rate,
+        grad_clip_norm=args.grad_clip_norm,
         checkpoint_selection=args.checkpoint_selection,
         dsad_beta_max=args.dsad_beta_max,
         dsad_warmup_fraction=args.dsad_warmup_fraction,

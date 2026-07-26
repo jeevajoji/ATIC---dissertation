@@ -49,6 +49,10 @@ class ReproducibilityTests(unittest.TestCase):
 
         self.assertEqual(snapshot["process_environment"], expected)
         self.assertIn("deterministic_algorithms_enabled", snapshot)
+        self.assertEqual(
+            set(snapshot["dependency_versions"]),
+            {"compressai", "numpy", "pillow", "timm", "torchvision"},
+        )
         self.assertIn("visible_gpu_names", snapshot)
 
     def test_model_state_hash_proves_equal_initial_weights(self):

@@ -5,6 +5,7 @@ Provides deterministic setup, run metadata capture, and JSON utilities so
 ablation runs can be reproduced from saved artifacts.
 """
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -124,6 +125,13 @@ def get_git_snapshot(repo_dir: str) -> Dict[str, Any]:
     }
 
 
+def _distribution_version(name: str) -> Optional[str]:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def get_environment_snapshot(device: str, repo_dir: str) -> Dict[str, Any]:
     """Capture Python, Torch, CUDA, and GPU context for exact reruns."""
     snapshot: Dict[str, Any] = {
@@ -137,6 +145,16 @@ def get_environment_snapshot(device: str, repo_dir: str) -> Dict[str, Any]:
         "deterministic_algorithms_enabled": (
             torch.are_deterministic_algorithms_enabled()
         ),
+        "dependency_versions": {
+            distribution: _distribution_version(distribution)
+            for distribution in (
+                "compressai",
+                "numpy",
+                "pillow",
+                "timm",
+                "torchvision",
+            )
+        },
         "requested_device": device,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "process_environment": {

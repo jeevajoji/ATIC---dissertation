@@ -37,6 +37,13 @@ LOSS_LOG_KEYS = (
     "student_gain_std",
     "teacher_spatial_std",
 )
+TRAIN_GRADIENT_LOG_KEYS = (
+    "main_grad_norm",
+    "main_grad_norm_max",
+    "main_grad_clip_fraction",
+    "aux_grad_norm",
+    "aux_grad_norm_max",
+)
 VALIDATION_MIN_KEYS = {"student_gain_min"}
 VALIDATION_MAX_KEYS = {"student_gain_max"}
 
@@ -240,6 +247,38 @@ def configure_optimizers(
     return optimizer, aux_optimizer
 
 
+def _optimizer_parameters(optimizer) -> tuple:
+    """Return each parameter owned by ``optimizer`` exactly once."""
+
+    parameters = []
+    seen = set()
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            identity = id(parameter)
+            if identity not in seen:
+                parameters.append(parameter)
+                seen.add(identity)
+    return tuple(parameters)
+
+
+def _clip_optimizer_gradients(
+    optimizer,
+    *,
+    max_norm: float,
+) -> float:
+    """Clip only gradients owned by one optimizer and return their old norm."""
+
+    parameters = _optimizer_parameters(optimizer)
+    if not parameters:
+        return 0.0
+    return float(
+        torch.nn.utils.clip_grad_norm_(
+            parameters,
+            max_norm=max_norm,
+        )
+    )
+
+
 def _cpu_state_dict(model) -> Dict[str, torch.Tensor]:
     """Clone a model state to CPU for validation-based checkpoint selection."""
 
@@ -256,6 +295,7 @@ def _validate_training_controls(
     lr_schedule: str,
     min_learning_rate: float,
     min_aux_learning_rate: float,
+    grad_clip_norm: Optional[float],
     checkpoint_selection: str,
     checkpoint_selection_start_epoch: int,
     epochs: int,
@@ -276,6 +316,16 @@ def _validate_training_controls(
     if min_aux_learning_rate > aux_learning_rate:
         raise ValueError(
             "min_aux_learning_rate must not exceed aux_learning_rate"
+        )
+    if (
+        grad_clip_norm is not None
+        and (
+            not math.isfinite(grad_clip_norm)
+            or grad_clip_norm < 0
+        )
+    ):
+        raise ValueError(
+            "grad_clip_norm must be finite and non-negative, or None"
         )
     if lr_schedule not in {"none", "cosine"}:
         raise ValueError("lr_schedule must be 'none' or 'cosine'")
@@ -481,6 +531,7 @@ def train_loop(
         lr_schedule=lr_schedule,
         min_learning_rate=min_learning_rate,
         min_aux_learning_rate=min_aux_learning_rate,
+        grad_clip_norm=grad_clip_norm,
         checkpoint_selection=checkpoint_selection,
         checkpoint_selection_start_epoch=checkpoint_selection_start_epoch,
         epochs=epochs,
@@ -521,6 +572,11 @@ def train_loop(
         learning_rate=learning_rate,
         aux_learning_rate=aux_learning_rate,
     )
+    aux_parameters = (
+        ()
+        if aux_optimizer is None
+        else _optimizer_parameters(aux_optimizer)
+    )
     scheduler = None
     aux_scheduler = None
     if lr_schedule == "cosine":
@@ -549,6 +605,7 @@ def train_loop(
         f"[{variant_name}] Training started on {device} | "
         f"lambda_rd={lambda_rd} | dsad_beta_max={dsad_beta_max} | "
         f"lr={learning_rate} | aux_lr={aux_learning_rate} | "
+        f"grad_clip_norm={grad_clip_norm} | "
         f"lr_schedule={lr_schedule} | "
         f"checkpoint_selection={checkpoint_selection}"
     )
@@ -579,6 +636,12 @@ def train_loop(
 
         epoch_totals = {key: 0.0 for key in LOSS_LOG_KEYS}
         epoch_totals["aux_loss"] = 0.0
+        main_grad_norm_total = 0.0
+        main_grad_norm_max = 0.0
+        main_grad_clipped_steps = 0
+        aux_grad_norm_total = 0.0
+        aux_grad_norm_max = 0.0
+        aux_grad_steps = 0
         epoch_steps = 0
 
         pbar = tqdm(
@@ -593,6 +656,11 @@ def train_loop(
             # Main model update
             # -------------------------
             optimizer.zero_grad(set_to_none=True)
+            if aux_optimizer is not None:
+                # Quantile parameters belong only to the auxiliary optimizer.
+                # Clear them before the main backward pass so no gradient from
+                # an earlier auxiliary step can survive into this batch.
+                aux_optimizer.zero_grad(set_to_none=True)
 
             outputs = model(batch)
             loss_dict = criterion(outputs, batch, beta=epoch_beta)
@@ -600,10 +668,26 @@ def train_loop(
 
             loss.backward()
 
+            main_clip_limit = (
+                float(grad_clip_norm)
+                if grad_clip_norm is not None and grad_clip_norm > 0
+                else math.inf
+            )
+            # Do not pass model.parameters() here. CompressAI quantiles are
+            # updated by a separate optimizer and historically retained their
+            # large auxiliary gradients until the next batch, corrupting the
+            # global norm used to scale the main codec gradients.
+            main_grad_norm = _clip_optimizer_gradients(
+                optimizer,
+                max_norm=main_clip_limit,
+            )
+            if not math.isfinite(main_grad_norm):
+                raise RuntimeError("Main gradient norm became non-finite")
+            main_grad_norm_total += main_grad_norm
+            main_grad_norm_max = max(main_grad_norm_max, main_grad_norm)
             if grad_clip_norm is not None and grad_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    max_norm=grad_clip_norm,
+                main_grad_clipped_steps += int(
+                    main_grad_norm > float(grad_clip_norm)
                 )
 
             optimizer.step()
@@ -618,7 +702,23 @@ def train_loop(
 
                 aux_loss = model.aux_loss()
                 aux_loss.backward()
+                aux_grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(
+                        aux_parameters,
+                        max_norm=math.inf,
+                    )
+                )
+                if not math.isfinite(aux_grad_norm):
+                    raise RuntimeError(
+                        "Auxiliary entropy gradient norm became non-finite"
+                    )
+                aux_grad_norm_total += aux_grad_norm
+                aux_grad_norm_max = max(aux_grad_norm_max, aux_grad_norm)
+                aux_grad_steps += 1
                 aux_optimizer.step()
+                # Keep the optimizer boundary explicit after the step as well
+                # as at the start of the next batch.
+                aux_optimizer.zero_grad(set_to_none=True)
 
                 aux_loss_value = float(aux_loss.item())
 
@@ -640,6 +740,7 @@ def train_loop(
                     "DSAD": f"{loss_dict['dsad_loss'].item():.4f}",
                     "beta": f"{epoch_beta:.4g}",
                     "Aux": f"{aux_loss_value:.4f}",
+                    "Grad": f"{main_grad_norm:.2f}",
                 }
             )
 
@@ -661,6 +762,21 @@ def train_loop(
                 {
                     key: epoch_totals[key] / epoch_steps
                     for key in LOSS_LOG_KEYS
+                }
+            )
+            epoch_avg.update(
+                {
+                    "main_grad_norm": main_grad_norm_total / epoch_steps,
+                    "main_grad_norm_max": main_grad_norm_max,
+                    "main_grad_clip_fraction": (
+                        main_grad_clipped_steps / epoch_steps
+                    ),
+                    "aux_grad_norm": (
+                        aux_grad_norm_total / aux_grad_steps
+                        if aux_grad_steps > 0
+                        else 0.0
+                    ),
+                    "aux_grad_norm_max": aux_grad_norm_max,
                 }
             )
 
@@ -728,6 +844,9 @@ def train_loop(
                 f" (weighted={epoch_avg['weighted_dsad_loss']:.4f},"
                 f" beta={epoch_avg['beta']:.4g})"
                 f" | Aux: {epoch_avg['aux_loss']:.4f}"
+                f" | Main Grad: {epoch_avg['main_grad_norm']:.3g}"
+                f" (clipped={epoch_avg['main_grad_clip_fraction']:.1%})"
+                f" | Aux Grad: {epoch_avg['aux_grad_norm']:.3g}"
                 f" | LR: {epoch_learning_rate:.3g}"
                 f"{val_msg}"
             )
@@ -840,6 +959,7 @@ def train_loop(
                 "minimum_learning_rate": min_learning_rate,
                 "initial_aux_learning_rate": aux_learning_rate,
                 "minimum_aux_learning_rate": min_aux_learning_rate,
+                "grad_clip_norm": grad_clip_norm,
             },
             handle,
             indent=2,

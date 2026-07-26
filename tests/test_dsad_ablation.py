@@ -49,6 +49,25 @@ class DSADAblationConfigurationTests(unittest.TestCase):
         self.assertTrue(full["use_adaptive_quant"])
         self.assertFalse(no_gain["use_adaptive_quant"])
 
+    def test_plain_swin_sanity_variant_retains_full_latent_geometry(self):
+        full = asdict(ABLATION_VARIANTS["Full_ATIC_NoDSAD"])
+        plain = asdict(ABLATION_VARIANTS["Plain_Swin_Hyperprior"])
+        differences = {
+            key
+            for key in full
+            if full[key] != plain[key]
+        }
+
+        self.assertEqual(
+            differences,
+            {"use_sag", "use_cbam", "use_adaptive_quant"},
+        )
+        self.assertTrue(plain["use_overlapping_patches"])
+        self.assertTrue(plain["use_hyperprior"])
+        self.assertFalse(plain["use_sag"])
+        self.assertFalse(plain["use_cbam"])
+        self.assertFalse(plain["use_adaptive_quant"])
+
     def test_groupnorm_sag_variant_changes_only_sag_normalization(self):
         batch = asdict(ABLATION_VARIANTS["No_AdaptiveQuant"])
         group = asdict(
@@ -115,6 +134,7 @@ class DSADAblationConfigurationTests(unittest.TestCase):
         self.assertEqual(args.dsad_warmup_fraction, 0.20)
         self.assertEqual(args.dsad_ramp_fraction, 0.10)
         self.assertEqual(args.lr_schedule, "cosine")
+        self.assertEqual(args.grad_clip_norm, 1.0)
         self.assertEqual(args.checkpoint_selection, "best_val_rd")
         self.assertIsNone(args.dataset_root)
         self.assertIsNone(args.frozen_split_dir)

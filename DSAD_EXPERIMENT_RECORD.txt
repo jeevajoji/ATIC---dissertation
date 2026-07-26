@@ -649,15 +649,17 @@ Outcome:
 
 Removing adaptive gain did not restore monotonicity. It produced a severe
 low-lambda collapse at lambda = 0.0018, and lambda = 0.013 used fewer bits and
-lower PSNR than lambda = 0.0067. Adaptive gain is therefore not the sole root
-cause.
+lower PSNR than lambda = 0.0067. This was initially interpreted as evidence
+that adaptive gain was not the sole root cause. The later optimiser audit
+showed that this run shared the stale-gradient clipping confounder, so it
+cannot cleanly identify or exonerate adaptive gain.
 
-The 0.0018 result selected epoch 30 even though the newly aligned beta = 8
-eligibility window should begin at epoch 36 for a 120-epoch run. This is an
-audit warning that the remote study may have started from the preceding
-commit/configuration. Because the experiment failed, it is retained only as
-diagnostic evidence and not as a positive causal result. The next run must
-hard-check the required commit before training.
+The stability report printed epoch 30 as "best epoch anywhere"; it did not
+print the selected checkpoint. Epoch 30 was intentionally ineligible under
+the shared beta = 8 checkpoint window, which began at epoch 36. Therefore the
+number was not evidence that the remote study used an older commit. The
+reporting utility was corrected to distinguish best-anywhere, best-eligible,
+and the checkpoint actually selected.
 
 The next isolated variant is:
 
@@ -669,6 +671,173 @@ their original configuration and state-dict keys. If the GroupNorm curve
 becomes monotonic, SAG running population statistics are implicated. If it
 still fails, the next gate removes SAG entirely and then tests the plain
 hyperprior baseline.
+
+GroupNorm SAG diagnostic results:
+
+    variant: No_AdaptiveQuant_GroupNormSAG
+    seed:    42
+    epochs:  120
+
+    lambda   actual BPP   PSNR (dB)   best/final epoch   final RD above best
+    -------------------------------------------------------------------------
+    0.0018    0.083639      16.193         120/120               +0.00%
+    0.0035    0.166994      16.569          93/120              +11.83%
+    0.0067    0.044320      11.481          88/120             +174.27%
+    0.0130    0.037793      12.250          96/120             +196.02%
+
+Outcome:
+
+    actual BPP monotonic: false
+    PSNR monotonic:       false
+    overall gate:         fail
+    Beauty evaluated:     no
+
+Replacing SAG BatchNorm with GroupNorm did not restore stable rate control.
+The two higher-lambda models collapsed to lower rate and substantially lower
+quality, and their final validation RD objectives were 174-196% worse than
+their best epochs anywhere.
+
+This intervention was later judged not to be a neutral normalisation swap.
+GroupNorm(1, 1) standardises the one-channel spatial attention logit separately
+for every image before sigmoid gating. At initialisation it therefore imposes
+a strong non-identity spatial gate at every encoder and decoder SAG location.
+Its affine parameters can learn to relax that gate, but the experiment cannot
+cleanly isolate BatchNorm running statistics. The result is retained as a
+failed diagnostic intervention, not as proof that BatchNorm was exonerated.
+
+
+14.1 CODE-LEVEL AUDIT AFTER THE GROUPNORM FAILURE
+-------------------------------------------------
+
+The audit found one definite training defect.
+
+ATIC uses separate optimisers:
+
+    main optimiser: all trainable parameters except *.quantiles
+    aux optimiser:  CompressAI entropy-bottleneck *.quantiles only
+
+The old training order was:
+
+    1. clear only main gradients;
+    2. backpropagate the main RD loss;
+    3. clip model.parameters() to global norm 1;
+    4. update the main optimiser;
+    5. clear, backpropagate, and update the auxiliary optimiser.
+
+After step 5, the large auxiliary quantile gradients remained populated.
+From the second batch onward, step 3 included those stale auxiliary gradients
+in the global norm even though the main optimiser did not own the quantile
+parameters. The auxiliary losses observed in the studies were of order
+7,000-8,000. Consequently, stale auxiliary gradients could reduce the scale
+of every main codec gradient during clipping. This contaminated every long
+run reported above and is a credible cause of weak or erratic learning.
+
+The implemented correction is:
+
+    1. clear both optimiser gradient sets before the main backward pass;
+    2. clip only parameters owned by the main optimiser;
+    3. measure and log the pre-clipping main-gradient norm;
+    4. log the fraction of main steps that were clipped;
+    5. measure the auxiliary-gradient norm separately; and
+    6. clear auxiliary gradients immediately after the auxiliary step.
+
+A regression test gives the main parameter a gradient of 3 and the excluded
+quantile parameter a gradient of 4,000. With a clipping limit of 10, the main
+gradient must remain 3. The test would fail under the old all-model clipping
+implementation.
+
+The audit confirmed that the following were correctly implemented:
+
+    1. the objective is BPP + lambda_rd * 255^2 * MSE;
+    2. lambda_rd reaches the criterion with the correct sign;
+    3. likelihood BPP includes both y and z and divides by N*H*W;
+    4. disabling adaptive gain returns an exact all-ones gain map;
+    5. main and auxiliary parameter groups are otherwise disjoint;
+    6. cosine scheduling, model-mode transitions, deterministic initialisation,
+       DataLoader reseeding, checkpoint cloning and checkpoint restoration are
+       internally consistent; and
+    7. the estimated and actual BPP reversals agree, so neither the ATIC file
+       header nor rANS created the non-monotonic ordering.
+
+Important remaining limitations and hypotheses:
+
+    1. The training split contains only 360 crops derived from 72 source
+       frames, while the approximately 206 MB model is trained from scratch.
+       There is no augmentation, dropout, or weight decay. Generalisation to
+       the separate ShakeNDry validation sequence can therefore be unstable.
+    2. The old Baseline is not a clean sanity variant: disabling overlap changes
+       512x512 latent grid from 8x8 to 4x4, removing 75% of spatial latent
+       positions.
+    3. Encoder LayerNorm is applied directly before unit quantisation. This
+       may constrain the latent-amplitude degree of freedom used for rate
+       control, especially when adaptive gain is disabled.
+    4. SAG and CBAM use repeated non-residual sigmoid multiplication rather
+       than an identity-initialised residual gate.
+    5. Gaussian scale prediction uses abs().clamp() rather than a smooth
+       positive parameterisation such as softplus. This is lower priority
+       until scale-floor statistics are measured.
+    6. Checkpoint selection minimises estimated validation RD, whereas the
+       gate uses real coded BPP. This is not the observed root cause, but it
+       remains a calibration limitation.
+
+All earlier long-run results remain scientifically useful as a transparent
+record of failed diagnostics, but none may be used as positive evidence for
+DSAD or SOTA compression because they share the clipping confounder.
+
+
+14.2 NEXT PREDECLARED SANITY GATE
+---------------------------------
+
+A new internal variant is defined:
+
+    Plain_Swin_Hyperprior
+
+It retains:
+
+    overlapping patches: true
+    hyperprior:           true
+    512x512 latent grid:  8x8
+
+It disables:
+
+    SAG:                  false
+    CBAM:                 false
+    adaptive gain:        false
+
+This is cleaner than the archived Baseline because it does not change latent
+geometry while removing the attention/gain mechanisms.
+
+The first corrected run is deliberately limited to the two extreme rates:
+
+    lambdas:       0.0018 and 0.013
+    seed:          42
+    epochs:        60
+    batch size:    4
+    main LR:       1e-4 -> 1e-6 cosine
+    aux LR:        1e-3 -> 1e-5 cosine
+    gradient clip: main optimiser only, norm 1
+    DSAD beta:     0
+    checkpoint:    best validation RD, eligible from epoch 1
+    evaluation:    real validation bitstreams
+    Beauty test:   locked
+
+Predeclared pass condition:
+
+    1. lambda 0.013 has at least 0.01 higher actual BPP;
+    2. lambda 0.013 has at least 0.25 dB higher PSNR; and
+    3. estimated BPP has the same ordering.
+
+The atic.rate_response utility merges the two locked-validation studies and
+enforces these thresholds without manual row selection. It refuses dirty or
+different Git commits and mismatches in the frozen bundle, architecture,
+initial weights, seed, duration, batch size, optimiser controls, or DSAD
+configuration.
+
+If the condition passes, the corrected trainer has basic rate response and a
+four-rate validation curve may be run. If it fails, DSAD remains stopped and
+the next oracle is CompressAI MeanScaleHyperprior, followed by an isolated
+test of the encoder's terminal latent LayerNorm. No Beauty evaluation is
+allowed during this recovery sequence.
 
 
 15. CLAIMS CURRENTLY SUPPORTED
@@ -691,8 +860,14 @@ The dissertation may currently state that:
        invalidated BD-rate calculation; and
     9. longer scheduled training and best-checkpoint restoration reduced the
        instability but did not restore monotonic rate control; and
-   10. disabling adaptive gain did not eliminate the instability, motivating
-       a separately labelled batch-independent SAG normalisation ablation.
+   10. under the now-confounded trainer, disabling adaptive gain did not
+       eliminate the instability and motivated a separately labelled SAG
+       normalisation diagnostic; and
+   11. replacing SAG BatchNorm with GroupNorm also failed, but the intervention
+       imposed a strong one-channel spatial normalisation and therefore did
+       not cleanly isolate BatchNorm; and
+   12. the optimiser audit identified stale auxiliary entropy gradients in
+       the main global clipping norm, which confounds all completed long runs.
 
 The negative result is useful: it prevented a misleading claim based on a
 single rate point and identified baseline convergence as a prerequisite for a
@@ -787,6 +962,19 @@ No-adaptive-gain analysis:
     /home/250399192/ATIC---dissertation/ablation_results/
     no_adaptive_gain_gate/no_adaptive_gain_analysis.json
 
+GroupNorm SAG studies:
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    groupnorm_sag_gate/groupnorm_sag_gpu0_20260726_105903
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    groupnorm_sag_gate/groupnorm_sag_gpu1_20260726_105921
+
+GroupNorm SAG analysis:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    groupnorm_sag_gate/groupnorm_sag_analysis.json
+
 
 18. THESIS-READY INTERIM RESULTS PARAGRAPH
 ------------------------------------------
@@ -818,9 +1006,17 @@ while header BPP was constant, locating the remaining problem in model-level
 rate control rather than container overhead or entropy-coder accounting. The
 next controlled ablation removed only the adaptive gain mechanism, but its
 four-rate curve also failed and showed a severe low-lambda collapse.
-Consequently, adaptive gain was rejected as the sole cause. The subsequent
-isolated experiment replaces SAG BatchNorm with batch-independent GroupNorm
-before any further DSAD or independent-test experiment.
+At that stage adaptive gain was provisionally rejected as the sole cause. A
+subsequent GroupNorm SAG intervention also failed, with high-lambda models
+collapsing in both rate and quality, but a later audit showed that its
+one-channel spatial normalisation was not a neutral replacement. More
+importantly, the audit identified stale auxiliary entropy gradients
+contaminating main-gradient clipping from the second batch onward. These
+architecture-cause interpretations are therefore withdrawn pending corrected
+controls. All completed long runs are treated as confounded diagnostic
+evidence, not positive evidence for DSAD. The corrected next gate uses only
+two extreme lambdas on an overlap-preserving plain Swin hyperprior, while the
+independent Beauty test remains locked.
 
 
 END OF RECORD

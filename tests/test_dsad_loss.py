@@ -17,7 +17,14 @@ except Exception as exc:  # pragma: no cover - lightweight hosts
     LOSS_IMPORT_ERROR = exc
 
 try:
-    from atic.train import LOSS_LOG_KEYS, dsad_beta_for_epoch, train_loop
+    from atic.train import (
+        LOSS_LOG_KEYS,
+        TRAIN_GRADIENT_LOG_KEYS,
+        _clip_optimizer_gradients,
+        configure_optimizers,
+        dsad_beta_for_epoch,
+        train_loop,
+    )
 
     SCHEDULE_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - lightweight hosts
@@ -216,6 +223,97 @@ class DSADScheduleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dsad_beta_for_epoch(0, 10, 0.1, 0.8, 0.3)
 
+    def test_main_clipping_excludes_large_auxiliary_quantile_gradient(self):
+        class SplitOptimizerModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.main = torch.nn.Parameter(torch.tensor(1.0))
+                self.entropy = torch.nn.Module()
+                self.entropy.register_parameter(
+                    "quantiles",
+                    torch.nn.Parameter(torch.tensor(1.0)),
+                )
+
+        model = SplitOptimizerModel()
+        optimizer, aux_optimizer = configure_optimizers(model)
+        self.assertIsNotNone(aux_optimizer)
+
+        model.main.grad = torch.tensor(3.0)
+        model.entropy.quantiles.grad = torch.tensor(4000.0)
+        observed_norm = _clip_optimizer_gradients(
+            optimizer,
+            max_norm=10.0,
+        )
+
+        self.assertAlmostEqual(observed_norm, 3.0)
+        self.assertAlmostEqual(float(model.main.grad), 3.0)
+        self.assertAlmostEqual(
+            float(model.entropy.quantiles.grad),
+            4000.0,
+        )
+
+        model.main.grad = torch.tensor(30.0)
+        observed_norm = _clip_optimizer_gradients(
+            optimizer,
+            max_norm=10.0,
+        )
+        self.assertAlmostEqual(observed_norm, 30.0)
+        self.assertAlmostEqual(float(model.main.grad), 10.0, places=5)
+        self.assertAlmostEqual(
+            float(model.entropy.quantiles.grad),
+            4000.0,
+        )
+
+    def test_train_loop_clears_auxiliary_gradients_and_logs_norms(self):
+        class TinyAuxModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.main = torch.nn.Parameter(torch.tensor(0.1))
+                self.entropy = torch.nn.Module()
+                self.entropy.register_parameter(
+                    "quantiles",
+                    torch.nn.Parameter(torch.tensor(1.0)),
+                )
+
+            def forward(self, batch):
+                return {
+                    "x_hat": torch.sigmoid(self.main) * torch.ones_like(batch),
+                    "likelihoods": {
+                        "y": batch.new_full((1, 1, 1, 1), 0.5),
+                        "z": batch.new_full((1, 1, 1, 1), 0.5),
+                    },
+                }
+
+            def aux_loss(self):
+                return 10000.0 * self.entropy.quantiles.square()
+
+        batch = torch.zeros(1, 3, 2, 2)
+        model = TinyAuxModel()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = train_loop(
+                model,
+                "tiny_aux",
+                [batch, batch],
+                epochs=1,
+                device="cpu",
+                lambda_rd=0.01,
+                checkpoint_path=str(Path(temp_dir) / "model.pth"),
+                save_reconstruction_each_epoch=False,
+            )
+
+        record = result["history"][0]
+        for key in TRAIN_GRADIENT_LOG_KEYS:
+            self.assertIn(key, record)
+        self.assertTrue(
+            all(
+                bool(torch.isfinite(torch.tensor(record[key])))
+                for key in TRAIN_GRADIENT_LOG_KEYS
+            )
+        )
+        self.assertGreater(record["aux_grad_norm"], 1000.0)
+        self.assertGreater(record["main_grad_clip_fraction"], 0.0)
+        self.assertIsNone(model.entropy.quantiles.grad)
+
     def test_train_and_validation_log_every_loss_component(self):
         class TinyDSADModel(torch.nn.Module):
             def __init__(self):
@@ -262,6 +360,8 @@ class DSADScheduleTests(unittest.TestCase):
             for key in LOSS_LOG_KEYS:
                 self.assertIn(key, record)
                 self.assertIn(f"val_{key}", record)
+            for key in TRAIN_GRADIENT_LOG_KEYS:
+                self.assertIn(key, record)
             self.assertAlmostEqual(record["beta"], 0.05)
             self.assertAlmostEqual(record["val_beta"], 0.05)
 
