@@ -134,6 +134,20 @@ after excluding only encoder.norm.weight and encoder.norm.bias.
 Checkpoint selection still uses estimated validation RD; the score in item 4
 is a post-hoc comparison, not the optimized checkpoint-selection objective.
 
+The terminal-latent-norm diagnostic completed with the following
+high-minus-low responses:
+
+    control:  actual BPP +0.014160, PSNR +0.151 dB
+    no norm:  actual BPP +0.120119, PSNR +1.685 dB
+
+The no-norm arm passed the rate-response sub-gate, while the control did not.
+The overall gate failed because no norm was +0.024536 worse by the post-hoc
+actual-rate RD score at lambda 0.0018. It was -24.895472 better at lambda
+0.013. This is a partial rate-control rescue, not proof of uniform compression
+superiority. Beauty remains locked. The next action is a read-only audit of
+the recorded latent amplitude, residual-zero, predicted-scale, convergence,
+and selected-checkpoint diagnostics before any new training is selected.
+
 The causal DSAD comparison changes only beta_max:
 
     Full_ATIC_NoDSAD: beta_max = 0

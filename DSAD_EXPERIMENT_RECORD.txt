@@ -1039,6 +1039,57 @@ post-hoc score in condition 4 is not the checkpoint-selection objective;
 checkpoints are selected using estimated validation RD.
 
 
+14.7 TERMINAL-LATENT-NORM RESULT
+---------------------------------
+
+The clean, validation-only paired diagnostic completed at seed 42. The
+paired-common initial-state and provenance checks passed, confirming that the
+two arms differed only by the encoder terminal LayerNorm state.
+
+Results:
+
+    variant        lambda   estimated BPP   actual BPP   PSNR     MSE
+    control        0.0018       0.026825      0.029053  10.023  0.103633
+    control        0.013        0.041208      0.043213  10.174  0.100028
+    no latent norm 0.0018       0.093507      0.087769  10.036  0.103341
+    no latent norm 0.013        0.211232      0.207888  11.721  0.070383
+
+High-minus-low response:
+
+    metric                 control     no latent norm
+    estimated BPP         +0.014383       +0.117725
+    actual BPP            +0.014160       +0.120119
+    PSNR                  +0.151 dB       +1.685 dB
+
+The no-norm arm passed every predeclared rate-response condition, whereas the
+control failed the 0.25 dB quality-response margin. This is evidence that the
+terminal LayerNorm materially restricted lambda-dependent rate and quality
+response under this seed and protocol.
+
+The complete predeclared gate nevertheless failed:
+
+    lambda   control actual-rate RD   no-norm actual-rate RD   difference
+    0.0018             12.158832               12.183368       +0.024536
+    0.013              84.599793               59.704321      -24.895472
+
+At lambda 0.0018, removing the norm was 0.2018% worse by the post-hoc
+actual-rate RD score. At lambda 0.013 it was 29.4273% better. Consequently,
+the result supports a rate-control mechanism hypothesis but does not establish
+uniform compression superiority, BD-rate improvement, statistical
+significance, or a DSAD benefit. Beauty remained locked.
+
+Artifacts:
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    latent_norm_gate/control/latent_norm_control_gpu0_20260726_154456
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    latent_norm_gate/intervention/latent_norm_no_norm_gpu1_20260726_154521
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    latent_norm_gate/latent_norm_gate_analysis.json
+
+
 15. CLAIMS CURRENTLY SUPPORTED
 ------------------------------
 
@@ -1072,7 +1123,10 @@ The dissertation may currently state that:
        diagnostic evidence of matching estimated and coded rate ordering, but
        failed the predeclared quality-response margin; and
    14. an official pretrained MeanScaleHyperprior produced a strong ordered
-       response on the same locked validation pipeline.
+       response on the same locked validation pipeline; and
+   15. removing the terminal encoder latent LayerNorm restored a strong
+       two-rate response at seed 42, but failed the complete superiority gate
+       because its low-lambda actual-rate RD score was slightly worse.
 
 The negative result is useful: it prevented a misleading claim based on a
 single rate point and identified baseline convergence as a prerequisite for a
@@ -1198,6 +1252,17 @@ CompressAI validation oracle:
     /home/250399192/ATIC---dissertation/ablation_results/
     compressai_oracle/mbt2018_mean_q1_q8_seed42.json
 
+Terminal latent-LayerNorm diagnostic:
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    latent_norm_gate/control/latent_norm_control_gpu0_20260726_154456
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    latent_norm_gate/intervention/latent_norm_no_norm_gpu1_20260726_154521
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    latent_norm_gate/latent_norm_gate_analysis.json
+
 
 18. THESIS-READY INTERIM RESULTS PARAGRAPH
 ------------------------------------------
@@ -1251,9 +1316,16 @@ locked validation split passed: quality 1 achieved 0.073659 payload BPP and
 31.061 dB, while quality 8 achieved 0.891030 payload BPP and 41.072 dB. The
 +0.817371 BPP and +10.011 dB changes passed every predeclared check without
 evaluating Beauty. This demonstrated that the shared validation and
-real-stream pipeline can exhibit a healthy response. The next controlled
-diagnostic therefore removes only ATIC's terminal encoder latent LayerNorm and
-compares it with a freshly trained plain control; DSAD remains stopped.
+real-stream pipeline can exhibit a healthy response. A subsequent clean,
+paired diagnostic removed only ATIC's terminal encoder latent LayerNorm. The
+control increased actual BPP by 0.014160 but PSNR by only 0.151 dB between
+lambda 0.0018 and 0.013. The no-norm arm increased actual BPP by 0.120119 and
+PSNR by 1.685 dB, passing all three response conditions. However, the complete
+superiority gate failed because the no-norm post-hoc actual-rate RD score was
+0.024536 worse at the low lambda, despite being 24.895472 better at the high
+lambda. The result therefore implicates terminal latent normalisation in the
+rate-control failure, but does not establish uniform compression improvement.
+DSAD and Beauty evaluation remain stopped.
 
 
 END OF RECORD
