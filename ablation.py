@@ -663,6 +663,10 @@ def run_ablation_study(
     evaluation_plan = _evaluation_plan(evaluate_test)
     checkpoint_selection_start_epoch = 1
     if checkpoint_selection == "best_val_rd" and dsad_beta_max > 0:
+        # Use one eligibility window for every variant in a study. This keeps
+        # architecture diagnostics (for example, disabling adaptive gain)
+        # matched to the causal DSAD pair instead of giving a historical
+        # ablation access to earlier checkpoints.
         checkpoint_selection_start_epoch = next(
             epoch + 1
             for epoch in range(epochs)
@@ -802,7 +806,7 @@ def run_ablation_study(
                 "min_learning_rate": min_learning_rate,
                 "min_aux_learning_rate": min_aux_learning_rate,
                 "checkpoint_selection": checkpoint_selection,
-                "causal_checkpoint_selection_start_epoch": (
+                "checkpoint_selection_start_epoch": (
                     checkpoint_selection_start_epoch
                 ),
                 "checkpoint_selection_metric": (
@@ -937,8 +941,6 @@ def run_ablation_study(
                             "checkpoint_selection": checkpoint_selection,
                             "checkpoint_selection_start_epoch": (
                                 checkpoint_selection_start_epoch
-                                if variant_name in CAUSAL_DSAD_VARIANTS
-                                else 1
                             ),
                         },
                         "device": device,
@@ -1004,8 +1006,6 @@ def run_ablation_study(
                     checkpoint_selection=checkpoint_selection,
                     checkpoint_selection_start_epoch=(
                         checkpoint_selection_start_epoch
-                        if variant_name in CAUSAL_DSAD_VARIANTS
-                        else 1
                     ),
                     checkpoint_path=os.path.join(run_dir, "model.pth"),
                     train_log_path=os.path.join(run_dir, "train_log.jsonl"),

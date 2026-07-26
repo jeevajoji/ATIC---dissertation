@@ -543,7 +543,7 @@ The changes are:
     8. explicit rejection of unlocked test studies by the gate; and
     9. epoch-by-epoch reconstruction previews retained.
 
-The next experiment is deliberately control-only:
+The first rescue experiment was deliberately control-only:
 
     variant:       Full_ATIC_NoDSAD
     seed:          42
@@ -564,28 +564,68 @@ Gate condition:
     At least four validation points must exist, and both actual BPP and PSNR
     must be non-decreasing as lambda_rd increases.
 
+Baseline-rescue results:
+
+    lambda   selected   estimated   payload     actual      PSNR
+             epoch     BPP         BPP         BPP         (dB)
+    ----------------------------------------------------------------
+    0.0018      112     0.078975    0.073781    0.077688    16.156
+    0.0035       88     0.430875    0.388118    0.392025    16.622
+    0.0067       52     0.375503    0.329277    0.333183    16.786
+    0.0130       70     0.987376    0.843028    0.846934    16.710
+
+The final validation RD loss was above the selected best checkpoint by:
+
+    lambda 0.0018:  +0.25%
+    lambda 0.0035: +13.25%
+    lambda 0.0067:  +6.91%
+    lambda 0.0130:  +4.33%
+
+This confirmed that final-epoch evaluation had been unsafe and that
+validation checkpoint restoration was necessary.
+
+The longer scheduled training substantially narrowed the PSNR range to
+16.156-16.786 dB and removed the earlier catastrophic quality collapses.
+However, the gate still failed:
+
+    actual BPP monotonic: false
+    PSNR monotonic:       false
+    overall gate:         fail
+
+The lambda = 0.0035 model was dominated by lambda = 0.0067: the latter used
+fewer actual bits and produced higher PSNR. The lambda = 0.013 model used
+substantially more bits but lost 0.076 dB relative to lambda = 0.0067.
+
+Rate-accounting diagnosis:
+
+    1. The 0.0035-to-0.0067 reversal appeared in both estimated and actual
+       BPP, so the entropy coder did not create the incorrect ordering.
+    2. Header BPP was constant at 0.003906 for every rate point.
+    3. The y stream dominated coded rate; z BPP remained approximately
+       0.0066-0.0119.
+    4. Payload BPP was below estimated BPP at every rate point. The
+       payload-minus-estimated gaps were -0.005194, -0.042757, -0.046227,
+       and -0.144349 BPP as lambda increased.
+    5. The increasing calibration gap should be improved later, but it does
+       not explain the non-monotonic ordering because estimated and actual
+       rates agree on that ordering.
+
 
 14. DECISION AFTER THE BASELINE-RESCUE RUN
 ------------------------------------------
 
-If the control gate passes:
+The control gate failed. Therefore:
 
-    1. train the matched Full_ATIC_DSAD arm with the same stable protocol;
-    2. calculate validation BD-rate;
-    3. repeat the complete paired experiment across at least three seeds;
-    4. require consistent actual-rate improvement or perceptual improvement at
-       matched actual BPP; and
-    5. unlock Beauty only after architecture and hyperparameters are frozen.
-
-If the control gate fails:
-
-    1. do not run more DSAD seeds;
-    2. compare No_AdaptiveQuant with Full_ATIC_NoDSAD to isolate the adaptive
-       gain mechanism;
-    3. if needed, replace SAG BatchNorm with batch-independent normalisation in
-       a separately labelled ablation;
-    4. re-establish a monotonic control curve; and
-    5. only then return to the DSAD comparison.
+    1. no further DSAD seed or Beauty test run is permitted yet;
+    2. the next controlled experiment disables adaptive gain while retaining
+       SAG, CBAM, hyperprior, data, seed, scheduler, training duration, and
+       checkpoint-selection window;
+    3. if No_AdaptiveQuant becomes monotonic, adaptive gain is identified as
+       the main rate-control failure;
+    4. if No_AdaptiveQuant also fails, the next isolated suspect is SAG
+       BatchNorm, followed by a plain hyperprior sanity baseline;
+    5. only after a monotonic control is established can the matched DSAD arm
+       and validation BD-rate study resume.
 
 
 15. CLAIMS CURRENTLY SUPPORTED
@@ -605,7 +645,9 @@ The dissertation may currently state that:
     7. beta = 8 produced encouraging single-rate validation improvements in
        PSNR and LPIPS across three seeds; and
     8. the multi-rate experiment revealed an unstable baseline and therefore
-       invalidated BD-rate calculation.
+       invalidated BD-rate calculation; and
+    9. longer scheduled training and best-checkpoint restoration reduced the
+       instability but did not restore monotonic rate control.
 
 The negative result is useful: it prevented a misleading claim based on a
 single rate point and identified baseline convergence as a prerequisite for a
@@ -674,6 +716,19 @@ Combined multi-rate analysis:
     /home/250399192/ATIC---dissertation/ablation_results/
     dsad_beta8_multirate_extension/multirate_bd_analysis.json
 
+Baseline-rescue studies:
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    baseline_rescue/baseline_rescue_gpu0_20260726_061742
+
+    /users/2/250399192/ATIC---dissertation/ablation_results/
+    baseline_rescue/baseline_rescue_gpu1_20260726_061757
+
+Baseline-rescue analysis:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    baseline_rescue/baseline_rescue_analysis.json
+
 
 18. THESIS-READY INTERIM RESULTS PARAGRAPH
 ------------------------------------------
@@ -698,7 +753,13 @@ seeds. The failure of the control indicated insufficient baseline
 optimisation rather than a DSAD-specific conclusion. Consequently, independent
 test evaluation remained locked and the training protocol was revised to use
 longer optimisation, cosine learning-rate decay, and validation-RD checkpoint
-selection before repeating the causal comparison.
+selection. This rescue narrowed validation PSNR to 16.156-16.786 dB and
+confirmed that final-epoch selection was unsafe, but actual BPP and PSNR
+remained non-monotonic. Estimated and coded rates showed the same ordering,
+while header BPP was constant, locating the remaining problem in model-level
+rate control rather than container overhead or entropy-coder accounting. The
+next controlled ablation therefore removes only the adaptive gain mechanism
+before any further DSAD or independent-test experiment.
 
 
 END OF RECORD

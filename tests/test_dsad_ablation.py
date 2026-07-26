@@ -36,6 +36,19 @@ class DSADAblationConfigurationTests(unittest.TestCase):
             asdict(ABLATION_VARIANTS[dsad]),
         )
 
+    def test_no_adaptive_quant_changes_only_the_gain_mechanism(self):
+        full = asdict(ABLATION_VARIANTS["Full_ATIC_NoDSAD"])
+        no_gain = asdict(ABLATION_VARIANTS["No_AdaptiveQuant"])
+        differences = {
+            key
+            for key in full
+            if full[key] != no_gain[key]
+        }
+
+        self.assertEqual(differences, {"use_adaptive_quant"})
+        self.assertTrue(full["use_adaptive_quant"])
+        self.assertFalse(no_gain["use_adaptive_quant"])
+
     def test_only_dsad_arm_receives_nonzero_beta(self):
         no_dsad = _dsad_settings_for_variant(
             "Full_ATIC_NoDSAD",

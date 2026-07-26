@@ -27,9 +27,7 @@ seeds, so zero of three seeds produced a valid PSNR BD-rate curve. Because
 the matched control also failed, this is a baseline training/rate-control
 failure rather than evidence for or against DSAD.
 
-Do not unlock Beauty, calculate publication BD-rate, tune DSAD further, or
-claim compression novelty until the identical-backbone control produces a
-monotonic validation RD curve. The current baseline-rescue protocol uses:
+The first baseline-rescue run used:
 
 1. deterministic cosine learning-rate decay;
 2. a substantially longer training budget;
@@ -37,10 +35,18 @@ monotonic validation RD curve. The current baseline-rescue protocol uses:
 4. checkpoint eligibility only after the DSAD warm-up/ramp in paired runs;
 5. a control-only four-rate, one-seed monotonicity gate.
 
-If that control gate still fails, isolate adaptive gain by comparing
-No_AdaptiveQuant against Full_ATIC_NoDSAD, then replace the small-batch
-BatchNorm layers in SAG with a batch-independent normalisation in a separately
-labelled architecture ablation. Only one cause is changed at a time.
+It removed the earlier catastrophic PSNR collapses, but still failed because
+actual BPP and PSNR were non-monotonic. Estimated and actual rate had the same
+ordering, and header BPP was constant, so entropy-coder/container accounting
+did not cause the reversal.
+
+Do not unlock Beauty, calculate publication BD-rate, tune DSAD further, or
+claim compression novelty until a control produces a monotonic validation RD
+curve. The current gate disables only adaptive gain using No_AdaptiveQuant
+while retaining SAG, CBAM, hyperprior, data, seed, optimiser, 120 epochs, and
+the matched checkpoint-selection window. If that gate also fails, replace the
+small-batch BatchNorm layers in SAG with batch-independent normalisation in a
+separately labelled architecture ablation. Only one cause changes at a time.
 
 The causal DSAD comparison changes only beta_max:
 
