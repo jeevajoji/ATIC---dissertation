@@ -36,6 +36,13 @@ LOSS_LOG_KEYS = (
     "student_gain_geomean",
     "student_gain_std",
     "teacher_spatial_std",
+    "latent_rms",
+    "latent_abs_mean",
+    "latent_symbol_zero_fraction",
+    "scale_min",
+    "scale_mean",
+    "scale_max",
+    "scale_below_table_min_fraction",
 )
 TRAIN_GRADIENT_LOG_KEYS = (
     "main_grad_norm",
@@ -44,8 +51,8 @@ TRAIN_GRADIENT_LOG_KEYS = (
     "aux_grad_norm",
     "aux_grad_norm_max",
 )
-VALIDATION_MIN_KEYS = {"student_gain_min"}
-VALIDATION_MAX_KEYS = {"student_gain_max"}
+VALIDATION_MIN_KEYS = {"student_gain_min", "scale_min"}
+VALIDATION_MAX_KEYS = {"student_gain_max", "scale_max"}
 
 
 def dsad_beta_for_epoch(
@@ -847,6 +854,10 @@ def train_loop(
                 f" | Main Grad: {epoch_avg['main_grad_norm']:.3g}"
                 f" (clipped={epoch_avg['main_grad_clip_fraction']:.1%})"
                 f" | Aux Grad: {epoch_avg['aux_grad_norm']:.3g}"
+                f" | Latent RMS: {epoch_avg['latent_rms']:.3g}"
+                f" (zero={epoch_avg['latent_symbol_zero_fraction']:.1%})"
+                f" | Scale<0.11: "
+                f"{epoch_avg['scale_below_table_min_fraction']:.1%}"
                 f" | LR: {epoch_learning_rate:.3g}"
                 f"{val_msg}"
             )

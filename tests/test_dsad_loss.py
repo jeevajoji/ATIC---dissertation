@@ -80,6 +80,46 @@ class DSADLossTests(unittest.TestCase):
         result["loss"].backward()
         self.assertIsNotNone(x_hat.grad)
 
+    def test_latent_and_scale_diagnostics_are_observational(self):
+        target = torch.zeros(1, 3, 2, 2)
+        x_hat = torch.zeros_like(target, requires_grad=True)
+        output = _base_output(x_hat)
+        output.update(
+            {
+                "latent_y": torch.tensor(
+                    [[[[0.1, 0.6], [-0.4, -1.6]]]],
+                    requires_grad=True,
+                ),
+                "gain_map": torch.ones(1, 1, 2, 2),
+                "means_hat": torch.zeros(1, 1, 2, 2),
+                "scales_hat": torch.tensor(
+                    [[[[1e-6, 0.05], [0.2, 0.3]]]]
+                ),
+            }
+        )
+
+        result = ATICLoss(lambda_rd=0.01)(output, target)
+
+        self.assertAlmostEqual(
+            result["latent_rms"].item(),
+            ((0.1**2 + 0.6**2 + 0.4**2 + 1.6**2) / 4) ** 0.5,
+            places=6,
+        )
+        self.assertAlmostEqual(result["latent_abs_mean"].item(), 0.675)
+        self.assertAlmostEqual(
+            result["latent_symbol_zero_fraction"].item(),
+            0.5,
+        )
+        self.assertAlmostEqual(result["scale_min"].item(), 1e-6)
+        self.assertAlmostEqual(result["scale_mean"].item(), 0.13750025)
+        self.assertAlmostEqual(result["scale_max"].item(), 0.3)
+        self.assertAlmostEqual(
+            result["scale_below_table_min_fraction"].item(),
+            0.5,
+        )
+        self.assertFalse(result["latent_rms"].requires_grad)
+        self.assertFalse(result["scale_mean"].requires_grad)
+
     def test_dsad_detaches_teacher_but_updates_student(self):
         target = torch.zeros(1, 3, 2, 2)
         x_hat = torch.zeros_like(target, requires_grad=True)

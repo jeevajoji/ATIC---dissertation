@@ -85,6 +85,41 @@ class ATICCodecRoundTripTests(unittest.TestCase):
             )
         )
 
+    def test_encoder_terminal_latent_norm_toggle_reaches_model(self):
+        torch.manual_seed(4321)
+        control = ATICModel(small_config(), H=64, W=64)
+        self.assertIsInstance(control.encoder.norm, torch.nn.LayerNorm)
+        self.assertIsInstance(control.decoder.norm, torch.nn.LayerNorm)
+
+        config = small_config()
+        config.use_encoder_latent_norm = False
+        torch.manual_seed(4321)
+        no_norm = ATICModel(config, H=64, W=64)
+
+        self.assertIsInstance(no_norm.encoder.norm, torch.nn.Identity)
+        # The intervention is encoder-only; decoder normalisation is retained.
+        self.assertIsInstance(no_norm.decoder.norm, torch.nn.LayerNorm)
+        self.assertNotEqual(control.architecture_id, no_norm.architecture_id)
+
+        control_state = control.state_dict()
+        no_norm_state = no_norm.state_dict()
+        self.assertEqual(
+            set(control_state) - set(no_norm_state),
+            {"encoder.norm.weight", "encoder.norm.bias"},
+        )
+        self.assertFalse(set(no_norm_state) - set(control_state))
+        for name in no_norm_state:
+            self.assertTrue(
+                torch.equal(control_state[name], no_norm_state[name]),
+                msg=f"Common initial tensor differs: {name}",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint = Path(temp_dir) / "no_norm.pth"
+            torch.save(no_norm_state, checkpoint)
+            with self.assertRaises(RuntimeError):
+                control.load_checkpoint(checkpoint, strict=True)
+
     def assert_entropy_diagnostics_equal(self, sender, receiver):
         for name in ("z_symbols", "y_symbols", "indexes"):
             sender_tensor = sender[name].detach().cpu()

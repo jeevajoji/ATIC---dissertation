@@ -370,6 +370,61 @@ class ATICLoss(nn.Module):
             )
             student_gain_std = student_stats.std(unbiased=False)
 
+        latent_y = output_dict.get("latent_y")
+        means_hat = output_dict.get("means_hat")
+        if latent_y is None:
+            latent_rms = target_clamped.new_zeros(())
+            latent_abs_mean = target_clamped.new_zeros(())
+            latent_symbol_zero_fraction = target_clamped.new_zeros(())
+        else:
+            latent_stats = latent_y.detach()
+            if not torch.isfinite(latent_stats).all():
+                raise ValueError("Latent diagnostics require finite values")
+            latent_rms = latent_stats.square().mean().sqrt()
+            latent_abs_mean = latent_stats.abs().mean()
+
+            if means_hat is None:
+                latent_symbol_zero_fraction = target_clamped.new_zeros(())
+            else:
+                means_stats = means_hat.detach()
+                if means_stats.shape != latent_stats.shape:
+                    raise ValueError(
+                        "Latent means must match the encoder latent shape"
+                    )
+                gain_stats = (
+                    torch.ones_like(latent_stats[:, :1])
+                    if student_map is None
+                    else student_map.detach()
+                )
+                if gain_stats.shape[-2:] != latent_stats.shape[-2:]:
+                    raise ValueError(
+                        "Latent gain diagnostics require matching spatial shape"
+                    )
+                centred_scaled = latent_stats * gain_stats - means_stats
+                latent_symbol_zero_fraction = (
+                    torch.round(centred_scaled) == 0
+                ).to(dtype=latent_stats.dtype).mean()
+
+        scales_hat = output_dict.get("scales_hat")
+        if scales_hat is None:
+            scale_min = target_clamped.new_zeros(())
+            scale_mean = target_clamped.new_zeros(())
+            scale_max = target_clamped.new_zeros(())
+            scale_below_table_min_fraction = target_clamped.new_zeros(())
+        else:
+            scale_stats = scales_hat.detach()
+            if not torch.isfinite(scale_stats).all():
+                raise ValueError("Scale diagnostics require finite values")
+            if not (scale_stats > 0).all():
+                raise ValueError("Scale diagnostics require positive values")
+            scale_min = scale_stats.amin()
+            scale_mean = scale_stats.mean()
+            scale_max = scale_stats.amax()
+            # CompressAI's default Gaussian scale table begins at 0.11.
+            scale_below_table_min_fraction = (
+                scale_stats < 0.11
+            ).to(dtype=scale_stats.dtype).mean()
+
         return {
             "loss": total_loss,
             "rd_loss": rd_loss,
@@ -394,4 +449,13 @@ class ATICLoss(nn.Module):
             "student_gain_geomean": student_gain_geomean,
             "student_gain_std": student_gain_std,
             "teacher_spatial_std": dsad["teacher_spatial_std"],
+            "latent_rms": latent_rms,
+            "latent_abs_mean": latent_abs_mean,
+            "latent_symbol_zero_fraction": latent_symbol_zero_fraction,
+            "scale_min": scale_min,
+            "scale_mean": scale_mean,
+            "scale_max": scale_max,
+            "scale_below_table_min_fraction": (
+                scale_below_table_min_fraction
+            ),
         }

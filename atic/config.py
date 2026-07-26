@@ -25,6 +25,10 @@ class ArchitectureConfig:
     depths: List[int] = field(default_factory=lambda: [2, 2, 2, 2])
     num_heads_enc: List[int] = field(default_factory=lambda: [4, 8, 16, 32])
     window_size: int = 8
+    # Final channel-wise LayerNorm immediately before entropy coding.
+    # True preserves all archived checkpoints. False is the separately
+    # labelled latent-amplitude/rate-control diagnostic.
+    use_encoder_latent_norm: bool = True
 
     # Attention stack inside each Swin block
     use_sag: bool = True       # Spatial Attention Gate

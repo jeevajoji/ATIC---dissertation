@@ -68,6 +68,21 @@ class DSADAblationConfigurationTests(unittest.TestCase):
         self.assertFalse(plain["use_cbam"])
         self.assertFalse(plain["use_adaptive_quant"])
 
+    def test_no_latent_norm_variant_changes_only_terminal_encoder_norm(self):
+        plain = asdict(ABLATION_VARIANTS["Plain_Swin_Hyperprior"])
+        no_norm = asdict(
+            ABLATION_VARIANTS["Plain_Swin_Hyperprior_NoLatentNorm"]
+        )
+        differences = {
+            key
+            for key in plain
+            if plain[key] != no_norm[key]
+        }
+
+        self.assertEqual(differences, {"use_encoder_latent_norm"})
+        self.assertTrue(plain["use_encoder_latent_norm"])
+        self.assertFalse(no_norm["use_encoder_latent_norm"])
+
     def test_groupnorm_sag_variant_changes_only_sag_normalization(self):
         batch = asdict(ABLATION_VARIANTS["No_AdaptiveQuant"])
         group = asdict(

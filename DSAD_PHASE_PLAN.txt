@@ -95,6 +95,43 @@ This oracle uses payload BPP because the upstream reference has no ATIC
 container header. It tests pipeline response and is not a direct absolute-BPP
 comparison against the complete .atic file rate.
 
+The oracle passed:
+
+    quality 1: 0.073659 payload BPP, 31.061 dB
+    quality 8: 0.891030 payload BPP, 41.072 dB
+    delta:     +0.817371 BPP, +10.011 dB
+
+All ordering and margin checks passed, and Beauty remained locked. This
+supports the dataset/evaluation pipeline being capable of a healthy response;
+it does not by itself prove which ATIC component is responsible.
+
+The next isolated ATIC diagnostic trains both arms fresh:
+
+    control:       Plain_Swin_Hyperprior
+    intervention:  Plain_Swin_Hyperprior_NoLatentNorm
+
+The intervention replaces only the encoder's terminal, 1024-channel
+LayerNorm immediately before entropy coding with Identity. It does not alter
+tokenizer, PatchMerging, decoder, reconstructor, entropy-model, latent-grid,
+optimizer, data, or checkpoint-selection settings. Removing the norm also
+removes its 2,048 affine parameters, so this is an architecture/rate-control
+diagnostic rather than a DSAD claim.
+
+Both variants use seed 42, lambdas 0.0018 and 0.013, 60 epochs, batch size 4,
+the corrected optimiser, cosine learning rates, DSAD beta 0, and locked
+validation-only bitstreams. The no-norm diagnosis passes only if:
+
+1. its high-minus-low actual BPP is at least +0.01;
+2. its high-minus-low estimated BPP is positive;
+3. its high-minus-low PSNR is at least +0.25 dB; and
+4. its actual coded RD objective,
+       BPP_actual + lambda * 255^2 * MSE,
+   is strictly lower than the freshly trained control at both lambdas.
+
+The archived dirty Plain checkpoints are not used as the control.
+The gate also requires matching paired-common initial-state hashes computed
+after excluding only encoder.norm.weight and encoder.norm.bias.
+
 The causal DSAD comparison changes only beta_max:
 
     Full_ATIC_NoDSAD: beta_max = 0

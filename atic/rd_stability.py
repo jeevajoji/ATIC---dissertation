@@ -276,6 +276,37 @@ def _load_run_provenance(
         or initial_state.get("variant") != variant
     ):
         raise RuntimeError(f"{run_dir}: initial-state identity mismatch")
+    common_initial_sha256 = str(
+        initial_state.get("paired_common_sha256", "")
+    )
+    source_common_initial_sha256 = str(
+        source.get("paired_common_initial_state_sha256", "")
+    )
+    if common_initial_sha256 != source_common_initial_sha256:
+        raise RuntimeError(
+            f"{run_dir}: paired-common initial-state identity mismatch"
+        )
+    common_excluded_names = initial_state.get(
+        "paired_common_excluded_names"
+    )
+    common_excluded_present_names = initial_state.get(
+        "paired_common_excluded_present_names"
+    )
+    if common_initial_sha256:
+        if (
+            not isinstance(common_excluded_names, list)
+            or not all(
+                isinstance(name, str) for name in common_excluded_names
+            )
+            or not isinstance(common_excluded_present_names, list)
+            or not all(
+                isinstance(name, str)
+                for name in common_excluded_present_names
+            )
+        ):
+            raise RuntimeError(
+                f"{run_dir}: paired-common exclusion metadata is invalid"
+            )
 
     git = run_environment.get("git")
     if (
@@ -384,6 +415,13 @@ def _load_run_provenance(
             "variant": variant,
             "architecture": run_config.get("architecture"),
             "initial_state_sha256": initial_sha256,
+            "paired_common_initial_state_sha256": (
+                common_initial_sha256 or None
+            ),
+            "paired_common_excluded_names": common_excluded_names,
+            "paired_common_excluded_present_names": (
+                common_excluded_present_names
+            ),
             "seed": int(source["seed"]),
             "epochs": run_config.get("epochs"),
             "batch_size": run_config.get("batch_size"),

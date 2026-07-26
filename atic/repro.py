@@ -14,7 +14,7 @@ import subprocess
 import sys
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import AbstractSet, Any, Dict, Optional
 
 import torch
 
@@ -69,16 +69,23 @@ def make_torch_generator(seed: int) -> torch.Generator:
     return gen
 
 
-def hash_model_state(model: torch.nn.Module) -> str:
-    """Hash model tensors in a stable name/dtype/shape/bytes order."""
+def hash_model_state(
+    model: torch.nn.Module,
+    *,
+    exclude_names: Optional[AbstractSet[str]] = None,
+) -> str:
+    """Hash selected model tensors in stable name/dtype/shape/bytes order."""
 
     digest = hashlib.sha256()
+    excluded = frozenset() if exclude_names is None else frozenset(exclude_names)
 
     def update_framed(payload: bytes) -> None:
         digest.update(len(payload).to_bytes(8, byteorder="big"))
         digest.update(payload)
 
     for name, tensor in sorted(model.state_dict().items()):
+        if name in excluded:
+            continue
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"State entry {name!r} is not a tensor")
         value = tensor.detach().cpu().contiguous()

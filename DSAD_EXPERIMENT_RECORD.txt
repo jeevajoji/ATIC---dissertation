@@ -946,6 +946,96 @@ Interpretation is fixed:
     3. Under neither result is Beauty unlocked.
 
 
+14.5 COMPRESSAI ORACLE RESULT
+------------------------------
+
+The clean, pinned validation-only oracle completed as follows:
+
+    quality   y+z payload BPP   mean per-image RGB PSNR
+       1           0.073659                 31.061 dB
+       8           0.891030                 41.072 dB
+
+Quality-8 minus quality-1:
+
+    payload BPP:  +0.817371
+    PSNR:         +10.011 dB
+
+Checks:
+
+    BPP ordering:          pass
+    PSNR ordering:         pass
+    BPP margin >= 0.01:    pass
+    PSNR margin >= 0.25:   pass
+    overall oracle:        pass
+    Beauty evaluated:      no
+
+The oracle therefore demonstrated that the same frozen ShakeNDry validation
+images, RGB PSNR aggregation, and real entropy-string accounting can exhibit
+a strong, correctly ordered response. This supports moving the fault
+localisation into ATIC's training/architecture path, but it does not prove a
+specific ATIC component is responsible. Absolute oracle payload BPP is not
+compared directly with ATIC complete-file BPP because the upstream reference
+has no .atic container header.
+
+Artifact:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    compressai_oracle/mbt2018_mean_q1_q8_seed42.json
+
+
+14.6 PREDECLARED TERMINAL-LATENT-NORM DIAGNOSTIC
+------------------------------------------------
+
+The next experiment isolates the encoder's final LayerNorm immediately before
+entropy coding. Both variants are trained fresh:
+
+    control:       Plain_Swin_Hyperprior
+    intervention:  Plain_Swin_Hyperprior_NoLatentNorm
+
+The control retains terminal encoder LayerNorm. The intervention replaces only
+that module with Identity. Tokenizer normalization, encoder PatchMerging
+normalizations, all decoder normalizations, reconstructor normalization,
+overlapping tokens, 8x8 latent geometry, hyperprior, and uniform gain remain
+unchanged. The change removes encoder.norm.weight and encoder.norm.bias,
+totalling 2,048 affine parameters. Common initial state tensors are required
+to be bit-identical under the same seed. Each run records a second
+initial-state hash after excluding only encoder.norm.weight and
+encoder.norm.bias; the final gate requires these paired-common hashes to
+match.
+
+Locked controls:
+
+    seed:          42
+    lambdas:       0.0018 and 0.013
+    epochs:        60
+    batch size:    4
+    main LR:       1e-4 -> 1e-6 cosine
+    aux LR:        1e-3 -> 1e-5 cosine
+    gradient clip: corrected main-only norm 1
+    DSAD beta:     0
+    checkpoint:    best validation RD from epoch 1
+    evaluation:    real validation bitstreams
+    Beauty:        locked
+
+Additional observational diagnostics are recorded without entering the loss:
+
+    latent RMS and mean absolute value;
+    approximate zero residual-symbol fraction;
+    predicted scale minimum, mean, and maximum; and
+    fraction of predicted scales below CompressAI's 0.11 table minimum.
+
+Predeclared no-norm pass condition:
+
+    1. high-minus-low actual BPP >= +0.01;
+    2. high-minus-low estimated BPP > 0;
+    3. high-minus-low PSNR >= +0.25 dB; and
+    4. BPP_actual + lambda * 255^2 * MSE is strictly lower than the freshly
+       trained control at both lambdas.
+
+The archived dirty Plain checkpoints are inadmissible as the comparator. This
+is an architecture/rate-control diagnostic, not evidence for DSAD.
+
+
 15. CLAIMS CURRENTLY SUPPORTED
 ------------------------------
 
@@ -977,7 +1067,9 @@ The dissertation may currently state that:
        and
    13. after correcting that defect, a seed-42, two-rate plain control provided
        diagnostic evidence of matching estimated and coded rate ordering, but
-       failed the predeclared quality-response margin.
+       failed the predeclared quality-response margin; and
+   14. an official pretrained MeanScaleHyperprior produced a strong ordered
+       response on the same locked validation pipeline.
 
 The negative result is useful: it prevented a misleading claim based on a
 single rate point and identified baseline convergence as a prerequisite for a
@@ -1098,6 +1190,11 @@ Diagnostic-only rate-response report:
     /users/2/250399192/ATIC---dissertation/ablation_results/
     plain_swin_trainer_gate/diagnostic_rate_response.json
 
+CompressAI validation oracle:
+
+    /home/250399192/ATIC---dissertation/ablation_results/
+    compressai_oracle/mbt2018_mean_q1_q8_seed42.json
+
 
 18. THESIS-READY INTERIM RESULTS PARAGRAPH
 ------------------------------------------
@@ -1146,8 +1243,14 @@ PSNR by only 0.150 dB and therefore failed the predeclared 0.250 dB quality
 margin. The selected checkpoints occurred at epochs 8 and 3 with PSNR values
 near 10 dB. Because pre-existing untracked log files caused both runs to carry
 a dirty provenance marker, the measurements are explicitly diagnostic-only.
-The next step is a pretrained CompressAI MeanScaleHyperprior oracle on the same
-locked validation split before any further ATIC or DSAD training.
+A subsequent pretrained CompressAI MeanScaleHyperprior oracle on the same
+locked validation split passed: quality 1 achieved 0.073659 payload BPP and
+31.061 dB, while quality 8 achieved 0.891030 payload BPP and 41.072 dB. The
++0.817371 BPP and +10.011 dB changes passed every predeclared check without
+evaluating Beauty. This demonstrated that the shared validation and
+real-stream pipeline can exhibit a healthy response. The next controlled
+diagnostic therefore removes only ATIC's terminal encoder latent LayerNorm and
+compares it with a freshly trained plain control; DSAD remains stopped.
 
 
 END OF RECORD

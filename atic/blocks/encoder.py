@@ -240,6 +240,7 @@ class SwinEncoder(nn.Module):
         window_size : Swin local window size
         use_sag     : enable SAG  (ablation toggle)
         use_cbam    : enable CBAM (ablation toggle)
+        use_terminal_norm: apply channel-wise LayerNorm to the coded latent
     """
 
     def __init__(
@@ -253,6 +254,7 @@ class SwinEncoder(nn.Module):
         use_sag: bool = True,
         use_cbam: bool = True,
         sag_normalization: str = "batch",
+        use_terminal_norm: bool = True,
     ):
         super().__init__()
 
@@ -284,7 +286,11 @@ class SwinEncoder(nn.Module):
         ])
 
         self.latent_dim = dims[3]   # 1024
-        self.norm = nn.LayerNorm(self.latent_dim)
+        self.norm = (
+            nn.LayerNorm(self.latent_dim)
+            if use_terminal_norm
+            else nn.Identity()
+        )
 
     def forward(
         self, x: torch.Tensor

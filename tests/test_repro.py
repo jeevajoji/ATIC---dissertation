@@ -82,6 +82,24 @@ class ReproducibilityTests(unittest.TestCase):
         second.counter.add_(1)
         self.assertNotEqual(hash_model_state(first), hash_model_state(second))
 
+    def test_model_state_hash_can_exclude_named_state(self):
+        first = torch.nn.Sequential(
+            torch.nn.Linear(3, 2),
+            torch.nn.LayerNorm(2),
+        )
+        second = torch.nn.Sequential(
+            torch.nn.Linear(3, 2),
+            torch.nn.Identity(),
+        )
+        second[0].load_state_dict(first[0].state_dict())
+
+        excluded = {"1.weight", "1.bias"}
+        self.assertNotEqual(hash_model_state(first), hash_model_state(second))
+        self.assertEqual(
+            hash_model_state(first, exclude_names=excluded),
+            hash_model_state(second, exclude_names=excluded),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

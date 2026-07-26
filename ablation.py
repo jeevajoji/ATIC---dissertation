@@ -44,11 +44,16 @@ def _full_atic_config() -> ArchitectureConfig:
 HISTORICAL_VARIANTS = (
     "Baseline",
     "Plain_Swin_Hyperprior",
+    "Plain_Swin_Hyperprior_NoLatentNorm",
     "No_Overlap",
     "No_CBAM",
     "No_AdaptiveQuant",
     "No_AdaptiveQuant_GroupNormSAG",
     "Full_ATIC",
+)
+
+ENCODER_TERMINAL_NORM_STATE_NAMES = frozenset(
+    {"encoder.norm.weight", "encoder.norm.bias"}
 )
 
 # This is the causal comparison for the paper: architecture, data, seed,
@@ -76,6 +81,17 @@ ABLATION_VARIANTS = {
         use_cbam=False,
         use_adaptive_quant=False,
         use_hyperprior=True,
+    ),
+    # Single-variable follow-up to the corrected trainer gate. It removes
+    # only the channel-wise LayerNorm directly before entropy coding, leaving
+    # tokenizer overlap, latent geometry, Swin stages, and hyperprior intact.
+    "Plain_Swin_Hyperprior_NoLatentNorm": ArchitectureConfig(
+        use_overlapping_patches=True,
+        use_sag=False,
+        use_cbam=False,
+        use_adaptive_quant=False,
+        use_hyperprior=True,
+        use_encoder_latent_norm=False,
     ),
     "No_Overlap": ArchitectureConfig(
         use_overlapping_patches=False,
@@ -1012,10 +1028,25 @@ def run_ablation_study(
                         generator.manual_seed(seed + loader_index)
                 model = ATICModel(config, H=height, W=width).to(device)
                 initial_state_sha256 = hash_model_state(model)
+                paired_common_initial_state_sha256 = hash_model_state(
+                    model,
+                    exclude_names=ENCODER_TERMINAL_NORM_STATE_NAMES,
+                )
+                initial_state_names = set(model.state_dict())
                 write_json(
                     os.path.join(run_dir, "initial_state.json"),
                     {
                         "sha256": initial_state_sha256,
+                        "paired_common_sha256": (
+                            paired_common_initial_state_sha256
+                        ),
+                        "paired_common_excluded_names": sorted(
+                            ENCODER_TERMINAL_NORM_STATE_NAMES
+                        ),
+                        "paired_common_excluded_present_names": sorted(
+                            ENCODER_TERMINAL_NORM_STATE_NAMES
+                            & initial_state_names
+                        ),
                         "seed": seed,
                         "variant": variant_name,
                     },
@@ -1114,6 +1145,9 @@ def run_ablation_study(
                     "lambda_rd": lam,
                     "dsad_beta_max": dsad_settings["beta_max"],
                     "initial_state_sha256": initial_state_sha256,
+                    "paired_common_initial_state_sha256": (
+                        paired_common_initial_state_sha256
+                    ),
                     "checkpoint_path": train_artifacts.get("checkpoint_path"),
                     "checkpoint_selection": checkpoint_selection,
                     "selected_epoch": train_artifacts.get("selected_epoch"),

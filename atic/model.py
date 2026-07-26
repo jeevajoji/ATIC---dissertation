@@ -161,6 +161,7 @@ class ATICModel(CompressionModel):
             use_sag=config.use_sag,
             use_cbam=config.use_cbam,
             sag_normalization=config.sag_normalization,
+            use_terminal_norm=config.use_encoder_latent_norm,
         )
 
         self.reconstructor = OverlappingPatchReconstructor(
@@ -259,6 +260,9 @@ class ATICModel(CompressionModel):
             "scales_hat": entropy_aux.get("scales_hat"),
             "means_hat": entropy_aux.get("means_hat"),
             "y_hat": y_hat,
+            # Training/evaluation diagnostic only. The operational decoder
+            # never receives this pre-entropy encoder tensor.
+            "latent_y": latent_y,
         }
 
     def load_checkpoint(
