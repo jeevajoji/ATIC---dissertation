@@ -174,6 +174,33 @@ The next ordered actions are therefore:
 
 Do not resume multi-rate DSAD training or unlock Beauty before both gates pass.
 
+The clipping calibration is locked before execution as follows:
+
+    architecture: Plain_Swin_Hyperprior_NoLatentNorm
+    seed:         42
+    lambdas:      0.0018 and 0.013
+    epochs:       60
+    candidates:   main-only clip norms 10 and 100
+    unchanged:    data bundle, initialization, batch size, learning rates,
+                  cosine schedule, auxiliary optimizer, checkpoint selection
+    evaluation:   validation only; Beauty locked
+
+Each candidate must independently satisfy all of these conditions:
+
+1. selected-checkpoint actual BPP increases by at least 0.01 from the low to
+   high lambda;
+2. selected-checkpoint PSNR increases by at least 0.25 dB;
+3. final training total BPP increases by at least 0.01 from the low to high
+   lambda;
+4. final high-lambda training MSE is at least 5% lower than final low-lambda
+   training MSE;
+5. final high-lambda training residual-symbol zero fraction is below 99%; and
+6. final high-lambda training RD is no more than 1% above its best training RD.
+
+At least one candidate must pass every condition. If both pass, retain norm 10,
+the smaller intervention. If neither passes, do not continue sweeping clip
+values: record the failure and proceed to the predeclared data-diversity stage.
+
 The causal DSAD comparison changes only beta_max:
 
     Full_ATIC_NoDSAD: beta_max = 0

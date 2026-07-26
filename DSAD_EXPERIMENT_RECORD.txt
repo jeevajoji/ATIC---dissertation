@@ -1153,6 +1153,25 @@ optimizer setting, replace the 360 highly correlated training frames with a
 larger, content-diverse, sequence-disjoint training corpus. A new multi-rate
 or DSAD study before both stages would remain uninterpretable.
 
+The calibration was predeclared before execution. With the dataset bundle,
+variant, seed 42, initialization, two lambdas (0.0018 and 0.013), 60 epochs,
+batch size, optimizer, learning-rate schedule, and validation-only checkpoint
+selection fixed, main-only clipping norms 10 and 100 will be evaluated in
+parallel. A candidate passes only if:
+
+    selected actual BPP high-minus-low >= 0.01;
+    selected PSNR high-minus-low >= 0.25 dB;
+    final training total BPP high-minus-low >= 0.01;
+    final high-rate training MSE <= 0.95 * final low-rate training MSE;
+    final high-rate training zero-symbol fraction < 99%; and
+    final high-rate training RD <= 1.01 * best training RD.
+
+At least one setting must satisfy all six conditions. If both pass, norm 10 is
+retained as the smaller intervention. If neither passes, no further clipping
+threshold will be selected on this validation bundle; the failure will be
+recorded and work will move to the predeclared data-diversity stage. Beauty
+remains locked throughout.
+
 
 15. CLAIMS CURRENTLY SUPPORTED
 ------------------------------
