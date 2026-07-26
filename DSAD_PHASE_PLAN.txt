@@ -148,6 +148,15 @@ superiority. Beauty remains locked. The next action is a read-only audit of
 the recorded latent amplitude, residual-zero, predicted-scale, convergence,
 and selected-checkpoint diagnostics before any new training is selected.
 
+That audit found a transient useful entropy regime only in the selected
+high-rate no-norm checkpoint: 3.25% of raw predicted scales were below 0.11
+and 80.81% of residual symbols were zero. By epoch 60 these values became
+99.96% and 100%, respectively, and validation RD degraded by 32.205363.
+Every high-rate batch was gradient-clipped. Because CompressAI internally
+lower-bounds scales at 0.11, this is not a coder-validity defect. Before
+changing the entropy scale head or optimiser, compare training and validation
+trajectories to distinguish overfitting from collapse on both splits.
+
 The causal DSAD comparison changes only beta_max:
 
     Full_ATIC_NoDSAD: beta_max = 0

@@ -1090,6 +1090,51 @@ Artifacts:
     latent_norm_gate/latent_norm_gate_analysis.json
 
 
+14.8 LATENT-NORM MECHANISM AUDIT
+---------------------------------
+
+The selected-checkpoint and final-epoch logs were audited without accessing
+Beauty. At the selected checkpoints:
+
+    arm/rate       epoch   raw scale <0.11   zero residuals   latent RMS
+    control low       8          98.94%           99.80%        0.9354
+    control high      3          85.19%           98.88%        0.9881
+    no-norm low       8          95.14%           98.93%        0.9967
+    no-norm high      8           3.25%           80.81%        0.3086
+
+Only the high-lambda no-norm checkpoint escaped near-total raw-scale-floor and
+zero-symbol occupancy. It consequently allocated 0.197066 estimated y BPP and
+reached 11.721 dB. This provides mechanism-level evidence that removing the
+terminal LayerNorm allowed a useful high-rate latent regime which the control
+did not reach.
+
+The regime was not stable. By epoch 60, the high-lambda no-norm model had
+99.96% of raw scales below 0.11, 100% approximate zero residuals, estimated
+y BPP of 0.000003, and validation MSE of 0.108720. Its validation RD loss was
+32.205363 above the selected epoch. All four runs selected very early
+checkpoints (epochs 3 or 8), and the final-minus-selected validation RD losses
+were:
+
+    control low:    +0.689048
+    control high:   +7.599451
+    no-norm low:    +0.730958
+    no-norm high:  +32.205363
+
+Main-gradient clipping remained active for every high-rate training batch.
+The selected high-rate no-norm epoch had mean pre-clipping main-gradient norm
+101.576, compared with 12.216 for the high-rate control. These observations
+show late validation entropy collapse and severe optimisation pressure, but
+do not alone distinguish training-set overfitting from within-training
+collapse.
+
+The below-0.11 statistic describes the raw hyper-synthesis prediction, not an
+invalid entropy-coder scale: CompressAI's GaussianConditional applies its own
+0.11 lower bound for both likelihood calculation and coding-index creation.
+Therefore the next diagnostic must compare training and validation RD,
+distortion, rate, and occupancy trajectories before changing the scale
+parameterisation or optimiser.
+
+
 15. CLAIMS CURRENTLY SUPPORTED
 ------------------------------
 
