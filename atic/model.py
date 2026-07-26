@@ -140,6 +140,7 @@ class ATICModel(CompressionModel):
             use_sag=config.use_sag,
             use_cbam=config.use_cbam,
             sag_normalization=config.sag_normalization,
+            use_terminal_norm=config.use_encoder_latent_norm,
         )
 
         # CompressAI entropy model.
@@ -161,7 +162,6 @@ class ATICModel(CompressionModel):
             use_sag=config.use_sag,
             use_cbam=config.use_cbam,
             sag_normalization=config.sag_normalization,
-            use_terminal_norm=config.use_encoder_latent_norm,
         )
 
         self.reconstructor = OverlappingPatchReconstructor(
